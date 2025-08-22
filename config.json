@@ -1,14 +1,16 @@
 {
-  "min_duration_minutes": 10,
+  "min_duration_minutes": 0.01,
   "supported_formats": [
     ".mp3",
-    ".wav"
+    ".wav",
+    ".mp4"
   ],
   "google_drive_path": "./test/input/drive",
   "local_audio_path": "./test/input/hijack",
   "speakers_path": "./organized_talks/speakers",
   "output_base_path": "./organized_talks",
   "talks_path": "./organized_talks/talks",
+  "transcripts_path": "./organized_talks/transcripts",
   "raw_talks_path": "./organized_talks/raw talks",
   "last_run_file": "last_run.json",
   "whisper_model": "medium",

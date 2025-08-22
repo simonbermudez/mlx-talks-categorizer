@@ -18,6 +18,10 @@ import librosa
 import soundfile as sf
 import numpy as np
 
+# Video processing for MP4 files
+import subprocess
+import re
+
 # MLX libraries for Apple Silicon optimization
 try:
     import mlx.core as mx
@@ -48,12 +52,13 @@ class Config:
         self.config_path = config_path
         self.default_config = {
             "min_duration_minutes": 10,
-            "supported_formats": [".mp3", ".wav"],
+            "supported_formats": [".mp3", ".wav", ".mp4"],
             "google_drive_path": "~/Google Drive/Audio",
             "local_audio_path": "~/Audio Hijack",
             "output_base_path": "./organized_talks",
             "speakers_path": "./organized_talks/speakers",
             "talks_path": "./organized_talks/talks",
+            "transcripts_path": "./organized_talks/transcripts",
             "raw_talks_path": "./organized_talks/raw talks",
             "last_run_file": "last_run.json",
             "whisper_model": "medium",
@@ -98,6 +103,24 @@ class AudioProcessor:
     def get_audio_duration(self, file_path: str) -> float:
         """Get duration of audio file in seconds."""
         try:
+            # For MP4 files, try ffprobe first as it handles video containers better
+            if file_path.lower().endswith('.mp4'):
+                try:
+                    result = subprocess.run([
+                        'ffprobe', '-v', 'quiet', '-print_format', 'json', 
+                        '-show_format', file_path
+                    ], capture_output=True, text=True, timeout=30)
+                    
+                    if result.returncode == 0:
+                        import json
+                        probe_data = json.loads(result.stdout)
+                        duration = float(probe_data['format']['duration'])
+                        return duration
+                except Exception:
+                    # Fallback to librosa
+                    pass
+            
+            # Use librosa for audio files or as fallback
             duration = librosa.get_duration(path=file_path)
             return duration
         except Exception as e:
@@ -121,7 +144,13 @@ class AudioProcessor:
     def extract_audio_features(self, file_path: str) -> Optional[np.ndarray]:
         """Extract MFCC features for speaker identification."""
         try:
-            y, sr = librosa.load(file_path, sr=22050)
+            # For MP4 files, extract audio first if needed
+            if file_path.lower().endswith('.mp4'):
+                # librosa can handle MP4 files directly for audio extraction
+                y, sr = librosa.load(file_path, sr=22050)
+            else:
+                y, sr = librosa.load(file_path, sr=22050)
+            
             mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
             # Take mean across time dimension
             features = np.mean(mfccs, axis=1)
@@ -192,14 +221,19 @@ class SpeakerIdentifier:
         features_list = []
         speaker_names = []
         
-        for speaker_file in self.speakers_path.glob("*.mp3"):
-            speaker_name = speaker_file.stem
-            features = self.audio_processor.extract_audio_features(str(speaker_file))
-            if features is not None:
-                self.speaker_features[speaker_name] = features
-                features_list.append(features)
-                speaker_names.append(speaker_name)
-                logging.info(f"Loaded speaker sample: {speaker_name}")
+        # Load speaker samples from all supported formats
+        supported_formats = self.config.get("supported_formats", [".mp3", ".wav", ".mp4"])
+        
+        for format_ext in supported_formats:
+            pattern = f"*{format_ext}"
+            for speaker_file in self.speakers_path.glob(pattern):
+                speaker_name = speaker_file.stem
+                features = self.audio_processor.extract_audio_features(str(speaker_file))
+                if features is not None:
+                    self.speaker_features[speaker_name] = features
+                    features_list.append(features)
+                    speaker_names.append(speaker_name)
+                    logging.info(f"Loaded speaker sample: {speaker_name} (from {speaker_file.suffix})")
         
         if features_list:
             # Fit scaler on all speaker features
@@ -250,12 +284,13 @@ class FileOrganizer:
         self.output_base = Path(config.get("output_base_path"))
         self.speakers_path = Path(config.get("speakers_path"))
         self.talks_path = Path(config.get("talks_path"))
+        self.transcripts_path = Path(config.get("transcripts_path"))
         self.raw_talks_path = Path(config.get("raw_talks_path"))
         self.setup_directories()
     
     def setup_directories(self):
         """Create necessary directory structure."""
-        for path in [self.output_base, self.speakers_path, self.talks_path, self.raw_talks_path]:
+        for path in [self.output_base, self.speakers_path, self.talks_path, self.transcripts_path, self.raw_talks_path]:
             path.mkdir(parents=True, exist_ok=True)
             logging.info(f"Directory ready: {path}")
     
@@ -264,22 +299,26 @@ class FileOrganizer:
         source_path = Path(source_file)
         year = str(datetime.now().year)
         
-        # Create speaker directory for this year
+        # Create speaker directory for this year (for audio files)
         speaker_year_dir = self.talks_path / year / speaker_name
         speaker_year_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create speaker directory for transcripts
+        transcript_speaker_year_dir = self.transcripts_path / year / speaker_name
+        transcript_speaker_year_dir.mkdir(parents=True, exist_ok=True)
         
         # Generate filenames
         base_filename = f"{speaker_name} - {description}"
         audio_filename = f"{base_filename}{source_path.suffix}"
         transcript_filename = f"{base_filename} (Transcript).txt"
         
-        # Copy audio file
+        # Copy audio file to talks directory
         audio_dest = speaker_year_dir / audio_filename
         shutil.copy2(source_file, audio_dest)
         logging.info(f"Organized audio: {audio_dest}")
         
-        # Save transcript
-        transcript_dest = speaker_year_dir / transcript_filename
+        # Save transcript to separate transcripts directory
+        transcript_dest = transcript_speaker_year_dir / transcript_filename
         with open(transcript_dest, 'w', encoding='utf-8') as f:
             f.write(transcript)
         logging.info(f"Saved transcript: {transcript_dest}")

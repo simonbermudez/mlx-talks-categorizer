@@ -1,0 +1,412 @@
+#!/bin/bash
+
+# MLX Talks Categorizer - Automated Cronjob Setup Script
+# This script automatically sets up a cronjob for the MLX Talks Categorizer
+# It works on any Mac by detecting the current directory and creating absolute paths
+
+set -e  # Exit on any error
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Get the absolute path of the current directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$SCRIPT_DIR"
+
+echo -e "${BLUE}MLX Talks Categorizer - Cronjob Setup${NC}"
+echo "=================================================="
+echo "Project directory: $PROJECT_DIR"
+echo ""
+
+# Function to print colored output
+print_status() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Check if we're in the right directory
+if [[ ! -f "$PROJECT_DIR/main.py" ]] || [[ ! -f "$PROJECT_DIR/config.json" ]]; then
+    print_error "This doesn't appear to be the MLX Talks Categorizer directory."
+    print_error "Please run this script from the project root directory."
+    exit 1
+fi
+
+print_status "Verified project directory structure"
+
+# Check for virtual environment
+VENV_PATH=""
+if [[ -d "$PROJECT_DIR/venv" ]]; then
+    VENV_PATH="$PROJECT_DIR/venv"
+    print_status "Found virtual environment at: $VENV_PATH"
+elif [[ -d "$PROJECT_DIR/.venv" ]]; then
+    VENV_PATH="$PROJECT_DIR/.venv"
+    print_status "Found virtual environment at: $VENV_PATH"
+else
+    print_error "Virtual environment not found. Please create one first:"
+    print_error "python3 -m venv venv"
+    print_error "source venv/bin/activate"
+    print_error "pip install -r requirements.txt"
+    exit 1
+fi
+
+# Test virtual environment
+if [[ ! -f "$VENV_PATH/bin/activate" ]]; then
+    print_error "Virtual environment appears to be corrupted (no activate script)"
+    exit 1
+fi
+
+# Check if Python script works
+print_status "Testing virtual environment and dependencies..."
+cd "$PROJECT_DIR"
+source "$VENV_PATH/bin/activate"
+if ! python3 -c "from main import AudioFileManager; print('Dependencies OK')" 2>/dev/null; then
+    print_error "Dependencies not properly installed in virtual environment"
+    print_error "Please run: pip install -r requirements.txt"
+    exit 1
+fi
+deactivate
+
+print_status "Virtual environment test passed"
+
+# Update config.json with absolute paths
+print_status "Updating config.json with absolute paths..."
+
+# Create a backup of the original config
+cp "$PROJECT_DIR/config.json" "$PROJECT_DIR/config.json.backup"
+
+# Read current config and update paths
+python3 << EOF
+import json
+import os
+
+config_path = '$PROJECT_DIR/config.json'
+project_dir = '$PROJECT_DIR'
+
+with open(config_path, 'r') as f:
+    config = json.load(f)
+
+# Update paths to absolute paths if they're relative
+def make_absolute(path, base_dir):
+    if path.startswith('./') or not path.startswith('/'):
+        # Convert relative path to absolute
+        if path.startswith('./'):
+            path = path[2:]  # Remove './'
+        return os.path.join(base_dir, path)
+    return path
+
+# Update relevant paths
+if 'google_drive_path' in config and config['google_drive_path'].startswith('./'):
+    # Keep user paths as-is, only update project-relative paths
+    pass
+elif 'google_drive_path' in config and config['google_drive_path'].startswith('~/'):
+    # Expand home directory
+    config['google_drive_path'] = os.path.expanduser(config['google_drive_path'])
+
+if 'local_audio_path' in config and config['local_audio_path'].startswith('~/'):
+    config['local_audio_path'] = os.path.expanduser(config['local_audio_path'])
+
+# Update project-relative paths
+config['output_base_path'] = make_absolute(config.get('output_base_path', './organized_talks'), project_dir)
+config['speakers_path'] = make_absolute(config.get('speakers_path', './organized_talks/speakers'), project_dir)
+config['talks_path'] = make_absolute(config.get('talks_path', './organized_talks/talks'), project_dir)
+config['transcripts_path'] = make_absolute(config.get('transcripts_path', './organized_talks/transcripts'), project_dir)
+config['raw_talks_path'] = make_absolute(config.get('raw_talks_path', './organized_talks/raw talks'), project_dir)
+
+# Update last_run_file to absolute path
+if 'last_run_file' in config and not config['last_run_file'].startswith('/'):
+    config['last_run_file'] = os.path.join(project_dir, config['last_run_file'])
+
+with open(config_path, 'w') as f:
+    json.dump(config, f, indent=2)
+
+print("Config updated with absolute paths")
+EOF
+
+print_status "Config.json updated with absolute paths"
+
+# Create wrapper script
+WRAPPER_SCRIPT="$PROJECT_DIR/run_audio_manager.sh"
+print_status "Creating wrapper script: $WRAPPER_SCRIPT"
+
+cat > "$WRAPPER_SCRIPT" << EOF
+#!/bin/bash
+
+# MLX Talks Categorizer Wrapper Script
+# Auto-generated by setup_cronjob.sh
+
+# Set the working directory
+cd "$PROJECT_DIR"
+
+# Activate the virtual environment
+source "$VENV_PATH/bin/activate"
+
+# Set environment variables
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:\$PATH"
+export PYTHONPATH="$PROJECT_DIR:\$PYTHONPATH"
+
+# Log start time
+echo "\$(date): Starting MLX Talks Categorizer" >> "$PROJECT_DIR/cronjob.log"
+
+# Run the audio manager with logging
+python3 "$PROJECT_DIR/main.py" >> "$PROJECT_DIR/cronjob.log" 2>&1
+EXIT_CODE=\$?
+
+# Log completion
+if [ \$EXIT_CODE -eq 0 ]; then
+    echo "\$(date): MLX Talks Categorizer completed successfully" >> "$PROJECT_DIR/cronjob.log"
+else
+    echo "\$(date): MLX Talks Categorizer failed with exit code \$EXIT_CODE" >> "$PROJECT_DIR/cronjob.log"
+fi
+
+# Deactivate virtual environment
+deactivate
+
+exit \$EXIT_CODE
+EOF
+
+chmod +x "$WRAPPER_SCRIPT"
+print_status "Wrapper script created and made executable"
+
+# Test the wrapper script (dry run)
+print_status "Testing wrapper script (syntax and environment)..."
+if bash -n "$WRAPPER_SCRIPT"; then
+    print_status "Wrapper script syntax is valid"
+    # Test if the script can activate the virtual environment
+    if source "$VENV_PATH/bin/activate" && python3 -c "print('Environment test OK')" && deactivate; then
+        print_status "Virtual environment activation test passed"
+    else
+        print_warning "Virtual environment test had issues, but continuing..."
+    fi
+else
+    print_error "Wrapper script has syntax errors"
+    exit 1
+fi
+
+# Schedule selection
+echo ""
+echo -e "${BLUE}Select a schedule for the cronjob:${NC}"
+echo "1) Daily at 2:00 AM"
+echo "2) Daily at 9:00 PM"
+echo "3) Every 6 hours"
+echo "4) Weekly on Sunday at 3:00 AM"
+echo "5) Every 2 hours (for testing)"
+echo "6) Custom schedule"
+echo ""
+read -p "Enter your choice (1-6): " SCHEDULE_CHOICE
+
+case $SCHEDULE_CHOICE in
+    1)
+        CRON_SCHEDULE="0 2 * * *"
+        SCHEDULE_DESC="Daily at 2:00 AM"
+        ;;
+    2)
+        CRON_SCHEDULE="0 21 * * *"
+        SCHEDULE_DESC="Daily at 9:00 PM"
+        ;;
+    3)
+        CRON_SCHEDULE="0 */6 * * *"
+        SCHEDULE_DESC="Every 6 hours"
+        ;;
+    4)
+        CRON_SCHEDULE="0 3 * * 0"
+        SCHEDULE_DESC="Weekly on Sunday at 3:00 AM"
+        ;;
+    5)
+        CRON_SCHEDULE="0 */2 * * *"
+        SCHEDULE_DESC="Every 2 hours"
+        ;;
+    6)
+        echo "Enter custom cron schedule (e.g., '0 4 * * *' for daily at 4 AM):"
+        read -p "Cron schedule: " CRON_SCHEDULE
+        SCHEDULE_DESC="Custom: $CRON_SCHEDULE"
+        ;;
+    *)
+        print_error "Invalid choice. Using default: Daily at 2:00 AM"
+        CRON_SCHEDULE="0 2 * * *"
+        SCHEDULE_DESC="Daily at 2:00 AM"
+        ;;
+esac
+
+# Setup method selection
+echo ""
+echo -e "${BLUE}Select setup method:${NC}"
+echo "1) crontab (traditional Unix cron)"
+echo "2) launchd (macOS native)"
+echo ""
+read -p "Enter your choice (1-2): " SETUP_METHOD
+
+if [[ "$SETUP_METHOD" == "2" ]]; then
+    # Setup launchd
+    print_status "Setting up launchd Launch Agent..."
+    
+    PLIST_FILE="$HOME/Library/LaunchAgents/com.mlx.talks.categorizer.plist"
+    
+    # Parse cron schedule for launchd
+    if [[ "$CRON_SCHEDULE" == "0 2 * * *" ]]; then
+        HOUR=2
+        MINUTE=0
+        INTERVAL_TYPE="daily"
+    elif [[ "$CRON_SCHEDULE" == "0 21 * * *" ]]; then
+        HOUR=21
+        MINUTE=0
+        INTERVAL_TYPE="daily"
+    elif [[ "$CRON_SCHEDULE" == "0 */6 * * *" ]]; then
+        INTERVAL_TYPE="interval"
+        INTERVAL_SECONDS=21600  # 6 hours
+    elif [[ "$CRON_SCHEDULE" == "0 3 * * 0" ]]; then
+        HOUR=3
+        MINUTE=0
+        WEEKDAY=0
+        INTERVAL_TYPE="weekly"
+    else
+        print_warning "Custom schedule may not work perfectly with launchd. Using daily at 2 AM."
+        HOUR=2
+        MINUTE=0
+        INTERVAL_TYPE="daily"
+    fi
+    
+    cat > "$PLIST_FILE" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mlx.talks.categorizer</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$WRAPPER_SCRIPT</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>$PROJECT_DIR</string>
+EOF
+
+    if [[ "$INTERVAL_TYPE" == "interval" ]]; then
+        cat >> "$PLIST_FILE" << EOF
+    <key>StartInterval</key>
+    <integer>$INTERVAL_SECONDS</integer>
+EOF
+    elif [[ "$INTERVAL_TYPE" == "weekly" ]]; then
+        cat >> "$PLIST_FILE" << EOF
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>$HOUR</integer>
+        <key>Minute</key>
+        <integer>$MINUTE</integer>
+        <key>Weekday</key>
+        <integer>$WEEKDAY</integer>
+    </dict>
+EOF
+    else
+        cat >> "$PLIST_FILE" << EOF
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>$HOUR</integer>
+        <key>Minute</key>
+        <integer>$MINUTE</integer>
+    </dict>
+EOF
+    fi
+
+    cat >> "$PLIST_FILE" << EOF
+    <key>StandardOutPath</key>
+    <string>$PROJECT_DIR/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>$PROJECT_DIR/launchd.log</string>
+</dict>
+</plist>
+EOF
+
+    # Load the launch agent
+    launchctl load "$PLIST_FILE"
+    print_status "Launch Agent created and loaded: $PLIST_FILE"
+    
+else
+    # Setup crontab
+    print_status "Setting up crontab..."
+    
+    # Check if crontab already has our entry
+    TEMP_CRON=$(mktemp)
+    crontab -l 2>/dev/null > "$TEMP_CRON" || true
+    
+    # Remove any existing MLX Talks Categorizer entries
+    grep -v "MLX Talks Categorizer" "$TEMP_CRON" > "${TEMP_CRON}.clean" || true
+    mv "${TEMP_CRON}.clean" "$TEMP_CRON"
+    
+    # Add our new entry
+    echo "# MLX Talks Categorizer - $SCHEDULE_DESC" >> "$TEMP_CRON"
+    echo "$CRON_SCHEDULE $WRAPPER_SCRIPT" >> "$TEMP_CRON"
+    
+    # Install the new crontab
+    crontab "$TEMP_CRON"
+    rm "$TEMP_CRON"
+    
+    print_status "Crontab updated successfully"
+fi
+
+# Create monitoring script
+MONITOR_SCRIPT="$PROJECT_DIR/monitor_cronjob.sh"
+cat > "$MONITOR_SCRIPT" << EOF
+#!/bin/bash
+echo "Monitoring MLX Talks Categorizer logs..."
+echo "Press Ctrl+C to stop"
+echo ""
+tail -f "$PROJECT_DIR/cronjob.log" "$PROJECT_DIR/launchd.log" 2>/dev/null | while read line; do
+    echo "\$(date '+%H:%M:%S'): \$line"
+done
+EOF
+chmod +x "$MONITOR_SCRIPT"
+
+# Final summary
+echo ""
+echo -e "${GREEN}==============================${NC}"
+echo -e "${GREEN}Setup completed successfully!${NC}"
+echo -e "${GREEN}==============================${NC}"
+echo ""
+echo "Configuration:"
+echo "  Project Directory: $PROJECT_DIR"
+echo "  Schedule: $SCHEDULE_DESC"
+echo "  Method: $([ "$SETUP_METHOD" == "2" ] && echo "launchd" || echo "crontab")"
+echo ""
+echo "Files created:"
+echo "  - Wrapper script: $WRAPPER_SCRIPT"
+echo "  - Monitor script: $MONITOR_SCRIPT"
+echo "  - Config backup: $PROJECT_DIR/config.json.backup"
+echo ""
+echo "To monitor the cronjob:"
+echo "  $MONITOR_SCRIPT"
+echo ""
+echo "To view logs:"
+echo "  tail -f $PROJECT_DIR/cronjob.log"
+if [[ "$SETUP_METHOD" == "2" ]]; then
+    echo "  tail -f $PROJECT_DIR/launchd.log"
+fi
+echo ""
+echo "To test manually:"
+echo "  $WRAPPER_SCRIPT"
+echo ""
+if [[ "$SETUP_METHOD" == "2" ]]; then
+    echo "To remove the cronjob:"
+    echo "  launchctl unload $HOME/Library/LaunchAgents/com.mlx.talks.categorizer.plist"
+    echo "  rm $HOME/Library/LaunchAgents/com.mlx.talks.categorizer.plist"
+else
+    echo "To remove the cronjob:"
+    echo "  crontab -e  # and delete the MLX Talks Categorizer lines"
+fi
+echo ""
+print_warning "Remember to grant Full Disk Access to Terminal in:"
+print_warning "System Preferences > Security & Privacy > Privacy > Full Disk Access"
+echo ""
+print_status "Setup complete! The cronjob will start running according to your schedule."

@@ -1,6 +1,6 @@
 # MLX Talks Categorizer
 
-An intelligent audio file management system that automatically organizes, transcribes, and categorizes MP3/WAV files using AI and machine learning, optimized for Apple Silicon with MLX.
+An intelligent audio file management system that automatically organizes, transcribes, and categorizes MP3/WAV/MP4 files using AI and machine learning, optimized for Apple Silicon with MLX.
 
 ## 🎯 Project Overview
 
@@ -39,12 +39,16 @@ The system creates and maintains this organizational structure:
 ```
 organized_talks/
 ├── speakers/                           # Voice samples for training
-│   ├── [SPEAKER_NAME].mp3             # Reference voice samples
+│   ├── [SPEAKER_NAME].[mp3|wav|mp4]   # Reference voice samples (any format)
 │   └── ...
-├── talks/                             # Organized processed talks
+├── talks/                             # Organized processed audio files
 │   └── [YEAR]/                        # Year-based organization
 │       └── [SPEAKER_NAME]/            # Speaker-specific folders
-│           ├── [SPEAKER] - [3_WORD_DESC].mp3
+│           ├── [SPEAKER] - [3_WORD_DESC].[mp3|wav|mp4]
+│           └── ...
+├── transcripts/                       # Organized transcript files (separate)
+│   └── [YEAR]/                        # Year-based organization
+│       └── [SPEAKER_NAME]/            # Speaker-specific folders
 │           ├── [SPEAKER] - [3_WORD_DESC] (Transcript).txt
 │           └── ...
 └── raw talks/                         # Backup copies of original files
@@ -104,18 +108,19 @@ Edit `config.json` to customize behavior:
 
 ```json
 {
-  "min_duration_minutes": 10,              // Minimum file duration to process
-  "supported_formats": [".mp3", ".wav"],   // Supported audio formats
-  "google_drive_path": "~/Google Drive/Audio",  // Google Drive source
-  "local_audio_path": "~/Audio Hijack",         // Local Audio Hijack folder
-  "output_base_path": "./organized_talks",      // Output directory
-  "speakers_path": "./organized_talks/speakers", // Speaker samples location
-  "talks_path": "./organized_talks/talks",       // Processed talks location
+  "min_duration_minutes": 10,                      // Minimum file duration to process
+  "supported_formats": [".mp3", ".wav", ".mp4"],  // Supported audio/video formats
+  "google_drive_path": "~/Google Drive/Audio",     // Google Drive source
+  "local_audio_path": "~/Audio Hijack",            // Local Audio Hijack folder
+  "output_base_path": "./organized_talks",         // Output directory
+  "speakers_path": "./organized_talks/speakers",   // Speaker samples location
+  "talks_path": "./organized_talks/talks",         // Processed audio files location
+  "transcripts_path": "./organized_talks/transcripts", // Transcripts location (separate)
   "raw_talks_path": "./organized_talks/raw talks", // Backup location
-  "last_run_file": "last_run.json",            // Incremental processing tracker
-  "whisper_model": "medium",                    // Whisper model size
-  "speaker_similarity_threshold": 0.85,        // Speaker matching threshold
-  "cleanup_days": 30                            // Days before cleanup
+  "last_run_file": "last_run.json",               // Incremental processing tracker
+  "whisper_model": "medium",                       // Whisper model size
+  "speaker_similarity_threshold": 0.85,           // Speaker matching threshold
+  "cleanup_days": 30                               // Days before cleanup
 }
 ```
 
@@ -131,14 +136,14 @@ Edit `config.json` to customize behavior:
 ### Adding Speaker Samples
 
 1. Record or obtain clean audio samples of each speaker (30+ seconds recommended)
-2. Save as MP3 files named with the speaker's name: `John_Doe.mp3`
+2. Save files named with the speaker's name: `John_Doe.mp3`, `Jane_Smith.wav`, or `Bob_Jones.mp4`
 3. Place in the `organized_talks/speakers/` directory
 
 ### Speaker Sample Requirements
 
 - **Duration**: 30+ seconds for better accuracy
 - **Quality**: Clear speech, minimal background noise
-- **Format**: MP3 or WAV
+- **Format**: MP3, WAV, or MP4 (video files will extract audio automatically)
 - **Content**: Natural speech patterns representative of the speaker
 
 ### How Speaker Identification Works
@@ -177,11 +182,36 @@ python main.py --setup
 4. **First Run**: Execute `--full-scan` to process existing files
 5. **Regular Processing**: Run without flags for incremental updates
 
+## 🕒 Automated Scheduling
+
+Set up automatic processing with the included cronjob setup script:
+
+```bash
+./setup_cronjob.sh
+```
+
+### Schedule Options Available:
+- **Daily at 2:00 AM** - Traditional off-hours processing
+- **Daily at 9:00 PM** - End-of-day processing when new files are added
+- **Every 6 hours** - Frequent processing for active workflows
+- **Weekly on Sunday at 3:00 AM** - Light processing for occasional use
+- **Every 2 hours** - For testing and development
+- **Custom schedule** - Enter your own cron expression
+
+The setup script automatically:
+- Detects your project directory and creates absolute paths
+- Updates `config.json` with proper configurations
+- Creates wrapper and monitoring scripts
+- Configures either crontab or macOS launchd
+- Tests the setup before activation
+
+For detailed setup instructions, see [SETUP_CRONJOB.md](SETUP_CRONJOB.md).
+
 ## 🔍 Processing Pipeline
 
 ### 1. File Discovery
 - Scans configured source directories recursively
-- Filters by supported file extensions (`.mp3`, `.wav`)
+- Filters by supported file extensions (`.mp3`, `.wav`, `.mp4`)
 - Checks modification time against last run date
 - Validates minimum duration requirement
 
@@ -205,7 +235,8 @@ python main.py --setup
 ### 5. File Organization
 - Creates year-based directory structure
 - Generates descriptive filenames with speaker and topic
-- Saves both audio file and transcript
+- Saves audio files in `talks/` directory
+- Saves transcripts separately in `transcripts/` directory
 - Maintains backup copies in raw talks directory
 
 ## 📊 Performance Characteristics

@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an Audio File Management Specialist project designed to organize, rename, and archive MP3/WAV files from multiple sources using AI and MLX (Apple Silicon optimization). The system processes audio files to:
+This is an Audio File Management Specialist project designed to organize, rename, and archive MP3/WAV/MP4 files from multiple sources using AI and MLX (Apple Silicon optimization). The system processes audio files to:
 
-- Aggregate MP3/WAV files from Google Drive and local Mac storage (Audio Hijack folder)
+- Aggregate MP3/WAV/MP4 files from Google Drive and local Mac storage (Audio Hijack folder)
 - Filter files that are 10+ minutes in duration
 - Transcribe audio files for context understanding
 - Identify speakers using voice samples
@@ -19,7 +19,7 @@ The project implements a specific folder organization:
 
 ```
 speakers/
-  └── [NAME OF THE SPEAKER].mp3       # Sample voices for speaker training
+  └── [NAME OF THE SPEAKER].[mp3|wav|mp4]  # Sample voices for speaker training
 talks/
   └── [YEAR]/
     └── [SPEAKER NAME]/
@@ -31,7 +31,7 @@ raw talks/                            # Unprocessed audio files
 ## Key Requirements
 
 - **Audio Processing**: Only process files ≥10 minutes duration
-- **File Formats**: Support .mp3 and .wav files
+- **File Formats**: Support .mp3, .wav, and .mp4 files
 - **MLX Optimization**: Workflow must be optimized for Apple Silicon
 - **Speaker Identification**: Use sample voices to train speaker recognition
 - **Transcription**: Generate and save transcripts alongside audio files
