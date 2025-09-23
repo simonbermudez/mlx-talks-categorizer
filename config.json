@@ -17,5 +17,12 @@
   "last_run_file": "last_run.json",
   "whisper_model": "medium",
   "speaker_similarity_threshold": 0.85,
-  "cleanup_days": 30
+  "cleanup_days": 30,
+  "title_generation": {
+    "method": "ollama",
+    "ollama_base_url": "http://localhost:11434",
+    "ollama_model": "llama3.2:3b",
+    "max_title_words": 3,
+    "fallback_to_simple": true
+  }
 }

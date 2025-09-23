@@ -28,6 +28,7 @@ The MLX Talks Categorizer is designed to solve the challenge of managing large v
 - **Python 3.13+** - Core runtime
 - **MLX** - Apple Silicon optimization framework
 - **OpenAI Whisper** - Speech-to-text transcription
+- **Ollama** - Local LLM inference for intelligent title generation
 - **librosa** - Audio analysis and feature extraction
 - **scikit-learn** - Machine learning algorithms for speaker identification
 - **ffmpeg** - Audio format support and processing
@@ -123,7 +124,14 @@ Edit `config.json` to customize behavior:
   "last_run_file": "last_run.json",               // Incremental processing tracker
   "whisper_model": "medium",                       // Whisper model size
   "speaker_similarity_threshold": 0.85,           // Speaker matching threshold
-  "cleanup_days": 30                               // Days before cleanup
+  "cleanup_days": 30,                              // Days before cleanup
+  "title_generation": {                            // Title generation configuration
+    "method": "ollama",                            // Method: "ollama" or "simple"
+    "ollama_base_url": "http://localhost:11434",  // Ollama server URL
+    "ollama_model": "llama3.2:3b",                // Ollama model to use
+    "max_title_words": 3,                         // Maximum words in generated titles
+    "fallback_to_simple": true                    // Fallback to simple method if Ollama fails
+  }
 }
 ```
 
@@ -134,6 +142,58 @@ Edit `config.json` to customize behavior:
 - **whisper_model**: Available options: `tiny`, `base`, `small`, `medium`, `large`
 - **speaker_similarity_threshold**: Cosine similarity threshold (0.0-1.0) for speaker matching
 - **cleanup_days**: Automatically removes files from raw talks older than this
+- **title_generation**: Configuration for AI-powered title generation
+  - **method**: Use "ollama" for LLM-generated titles or "simple" for keyword extraction
+  - **ollama_base_url**: URL of your Ollama server (default: http://localhost:11434)
+  - **ollama_model**: Ollama model to use (e.g., llama3.2:3b, mistral, etc.)
+  - **max_title_words**: Maximum number of words in generated titles
+  - **fallback_to_simple**: Whether to use simple method if Ollama fails
+
+## 🤖 Ollama Setup for AI Title Generation
+
+### Installing Ollama
+
+1. **Install Ollama** on macOS:
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+2. **Start Ollama server**:
+```bash
+ollama serve
+```
+
+3. **Pull a model** (recommended models):
+```bash
+# Lightweight and fast
+ollama pull llama3.2:3b
+
+# More capable but slower
+ollama pull llama3.2:8b
+
+# Alternative models
+ollama pull mistral
+ollama pull phi3
+```
+
+### Ollama Configuration
+
+The system uses Ollama to generate intelligent, context-aware titles from transcript content. Configure in `config.json`:
+
+- **ollama_base_url**: Default is `http://localhost:11434`
+- **ollama_model**: Choose based on your hardware:
+  - `llama3.2:3b` - Fast, good for most uses (2GB RAM)
+  - `llama3.2:8b` - Better quality (5GB RAM)
+  - `mistral` - Alternative option
+- **fallback_to_simple**: Recommended `true` for reliability
+
+### Title Generation Features
+
+- **AI-Powered**: Uses LLM understanding to create meaningful titles
+- **Context-Aware**: Analyzes full transcript for thematic understanding
+- **Configurable Length**: Set `max_title_words` to control title length
+- **Automatic Fallback**: Falls back to keyword extraction if Ollama unavailable
+- **Error Handling**: Robust handling of network issues and timeouts
 
 ## 🎤 Speaker Identification Setup
 
@@ -334,8 +394,15 @@ pip install -r requirements.txt
 
 **Memory Issues**
 - Use smaller Whisper model (`small` or `base`)
+- Use smaller Ollama model (`llama3.2:3b` instead of `8b`)
 - Process files in smaller batches
 - Monitor system memory during large operations
+
+**Ollama Connection Issues**
+- Verify Ollama is running: `ollama list`
+- Check server status: `curl http://localhost:11434/api/version`
+- Ensure model is pulled: `ollama pull llama3.2:3b`
+- Check `ollama_base_url` in config.json
 
 ### Debug Mode
 

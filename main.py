@@ -18,6 +18,10 @@ import librosa
 import soundfile as sf
 import numpy as np
 
+# Title Generation
+import requests
+import json
+
 # Video processing for MP4 files
 import subprocess
 import re
@@ -65,7 +69,14 @@ class Config:
             "last_run_file": "last_run.json",
             "whisper_model": "medium",
             "speaker_similarity_threshold": 0.85,
-            "cleanup_days": 30
+            "cleanup_days": 30,
+            "title_generation": {
+                "method": "ollama",
+                "ollama_base_url": "http://localhost:11434",
+                "ollama_model": "llama3.2:3b",
+                "max_title_words": 3,
+                "fallback_to_simple": True
+            }
         }
         self.config = self.load_config()
     
@@ -163,11 +174,13 @@ class AudioProcessor:
 
 
 class Transcriber:
-    """Handles audio transcription using Whisper."""
-    
+    """Handles audio transcription using Whisper and title generation using Ollama."""
+
     def __init__(self, config: Config):
         self.config = config
         self.model = None
+        self.title_config = config.get("title_generation", {})
+
         if WHISPER_AVAILABLE:
             try:
                 model_name = config.get("whisper_model", "medium")
@@ -189,17 +202,108 @@ class Transcriber:
             logging.error(f"Error transcribing {file_path}: {e}")
             return None
     
-    def generate_description(self, transcript: str) -> str:
-        """Generate 3-word description from transcript."""
-        # Simple approach: extract key words and use first 3
+    def generate_ollama_title(self, transcript: str) -> Optional[str]:
+        """Generate title using Ollama LLM."""
+        if not REQUESTS_AVAILABLE:
+            logging.warning("requests library not available for Ollama")
+            return None
+
+        try:
+            base_url = self.title_config.get("ollama_base_url", "http://localhost:11434")
+            model = self.title_config.get("ollama_model", "llama3.2:3b")
+            max_words = self.title_config.get("max_title_words", 3)
+
+            # Create a focused prompt for title generation
+            prompt = f"""Based on this transcript, create a concise {max_words}-word title that captures the main topic or theme.
+
+            Transcript: {transcript[:1000]}...
+
+            Respond with only the {max_words}-word title, no explanations or additional text."""
+
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.3,
+                    "top_p": 0.9,
+                    "num_predict": 20
+                }
+            }
+
+            response = requests.post(
+                f"{base_url}/api/generate",
+                json=payload,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                title = result.get("response", "").strip()
+
+                # Clean up the title - remove quotes, periods, etc.
+                title = title.strip('"\'.,!?')
+
+                # Ensure it's roughly the right length
+                words = title.split()
+                if len(words) > max_words:
+                    title = " ".join(words[:max_words])
+
+                if title:
+                    logging.info(f"Generated Ollama title: {title}")
+                    return title.title()
+                else:
+                    logging.warning("Ollama returned empty title")
+                    return None
+            else:
+                logging.error(f"Ollama API error: {response.status_code} - {response.text}")
+                return None
+
+        except requests.exceptions.ConnectionError:
+            logging.warning("Could not connect to Ollama server")
+            return None
+        except requests.exceptions.Timeout:
+            logging.warning("Ollama request timed out")
+            return None
+        except Exception as e:
+            logging.error(f"Error generating Ollama title: {e}")
+            return None
+
+    def generate_simple_title(self, transcript: str) -> str:
+        """Generate simple title by extracting key words."""
+        max_words = self.title_config.get("max_title_words", 3)
         words = transcript.lower().split()
+
         # Filter out common words
-        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were'}
+        stop_words = {
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+            'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does',
+            'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can', 'this', 'that',
+            'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them'
+        }
+
         filtered_words = [word for word in words if word not in stop_words and len(word) > 2]
-        
-        # Take first 3 meaningful words
-        description_words = filtered_words[:3] if len(filtered_words) >= 3 else words[:3]
+
+        # Take first meaningful words up to max_words
+        description_words = filtered_words[:max_words] if len(filtered_words) >= max_words else words[:max_words]
         return " ".join(description_words).title()
+
+    def generate_description(self, transcript: str) -> str:
+        """Generate description from transcript using configured method."""
+        method = self.title_config.get("method", "simple")
+        fallback = self.title_config.get("fallback_to_simple", True)
+
+        if method == "ollama":
+            title = self.generate_ollama_title(transcript)
+            if title:
+                return title
+            elif fallback:
+                logging.info("Falling back to simple title generation")
+                return self.generate_simple_title(transcript)
+            else:
+                return "Unknown Title"
+        else:
+            return self.generate_simple_title(transcript)
 
 
 class SpeakerIdentifier:
