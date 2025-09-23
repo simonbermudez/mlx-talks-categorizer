@@ -6,7 +6,7 @@ An intelligent audio file management system that automatically organizes, transc
 
 The MLX Talks Categorizer is designed to solve the challenge of managing large volumes of audio files from multiple sources. It automatically:
 
-- **Aggregates** audio files from Google Drive and local storage (Audio Hijack)
+- **Aggregates** audio files from multiple configured input directories (Google Drive, local storage, etc.)
 - **Filters** files by duration (10+ minutes minimum)
 - **Transcribes** audio content using OpenAI Whisper
 - **Identifies** speakers using voice pattern recognition
@@ -110,8 +110,11 @@ Edit `config.json` to customize behavior:
 {
   "min_duration_minutes": 10,                      // Minimum file duration to process
   "supported_formats": [".mp3", ".wav", ".mp4"],  // Supported audio/video formats
-  "google_drive_path": "~/Google Drive/Audio",     // Google Drive source
-  "local_audio_path": "~/Audio Hijack",            // Local Audio Hijack folder
+  "audio_inputs": [                                // List of audio input directories
+    "~/Google Drive/Audio",                        // Google Drive source
+    "~/Audio Hijack",                              // Local Audio Hijack folder
+    "~/Downloads/Audio"                            // Additional source (example)
+  ],
   "output_base_path": "./organized_talks",         // Output directory
   "speakers_path": "./organized_talks/speakers",   // Speaker samples location
   "talks_path": "./organized_talks/talks",         // Processed audio files location
@@ -127,6 +130,7 @@ Edit `config.json` to customize behavior:
 ### Configuration Options Explained
 
 - **min_duration_minutes**: Only processes files longer than this duration
+- **audio_inputs**: Array of input directories to scan for audio files (supports unlimited sources)
 - **whisper_model**: Available options: `tiny`, `base`, `small`, `medium`, `large`
 - **speaker_similarity_threshold**: Cosine similarity threshold (0.0-1.0) for speaker matching
 - **cleanup_days**: Automatically removes files from raw talks older than this
