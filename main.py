@@ -204,10 +204,6 @@ class Transcriber:
     
     def generate_ollama_title(self, transcript: str) -> Optional[str]:
         """Generate title using Ollama LLM."""
-        if not REQUESTS_AVAILABLE:
-            logging.warning("requests library not available for Ollama")
-            return None
-
         try:
             base_url = self.title_config.get("ollama_base_url", "http://localhost:11434")
             model = self.title_config.get("ollama_model", "llama3.2:3b")
@@ -301,7 +297,7 @@ class Transcriber:
                 logging.info("Falling back to simple title generation")
                 return self.generate_simple_title(transcript)
             else:
-                return "Unknown Title"
+                return "Untitled Recording"
         else:
             return self.generate_simple_title(transcript)
 
@@ -354,17 +350,17 @@ class SpeakerIdentifier:
     def identify_speaker(self, audio_file: str) -> str:
         """Identify speaker from audio file."""
         if not self.speaker_features:
-            return "Unknown"
+            return "Miscellaneous Speakers"
         
         features = self.audio_processor.extract_audio_features(audio_file)
         if features is None:
-            return "Unknown"
+            return "Miscellaneous Speakers"
         
         # Normalize features
         normalized_features = self.scaler.transform(features.reshape(1, -1))[0]
         
         # Calculate similarities
-        best_speaker = "Unknown"
+        best_speaker = "Miscellaneous Speakers"
         best_similarity = 0
         threshold = self.config.get("speaker_similarity_threshold", 0.85)
         

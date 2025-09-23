@@ -294,7 +294,7 @@ For detailed setup instructions, see [SETUP_CRONJOB.md](SETUP_CRONJOB.md).
 - Compares audio features against known speaker samples
 - Uses cosine similarity for voice pattern matching
 - Applies configurable threshold for identification confidence
-- Falls back to "Unknown" for unmatched speakers
+- Falls back to "Miscellaneous Speakers" for unmatched speakers
 
 ### 5. File Organization
 - Creates year-based directory structure

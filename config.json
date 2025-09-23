@@ -6,8 +6,8 @@
     ".mp4"
   ],
   "audio_inputs": [
-    "./test/input/drive",
-    "./test/input/hijack"
+    "./test/drive",
+    "./test/hijack"
   ],
   "speakers_path": "./organized_talks/speakers",
   "output_base_path": "./organized_talks",
@@ -21,8 +21,8 @@
   "title_generation": {
     "method": "ollama",
     "ollama_base_url": "http://localhost:11434",
-    "ollama_model": "llama3.2:3b",
-    "max_title_words": 3,
-    "fallback_to_simple": true
+    "ollama_model": "gemma3:4b",
+    "max_title_words": 6,
+    "fallback_to_simple": false
   }
 }
