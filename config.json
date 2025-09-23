@@ -5,8 +5,10 @@
     ".wav",
     ".mp4"
   ],
-  "google_drive_path": "./test/input/drive",
-  "local_audio_path": "./test/input/hijack",
+  "audio_inputs": [
+    "./test/input/drive",
+    "./test/input/hijack"
+  ],
   "speakers_path": "./organized_talks/speakers",
   "output_base_path": "./organized_talks",
   "talks_path": "./organized_talks/talks",

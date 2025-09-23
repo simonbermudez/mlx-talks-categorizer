@@ -53,8 +53,10 @@ class Config:
         self.default_config = {
             "min_duration_minutes": 10,
             "supported_formats": [".mp3", ".wav", ".mp4"],
-            "google_drive_path": "~/Google Drive/Audio",
-            "local_audio_path": "~/Audio Hijack",
+            "audio_inputs": [
+                "~/Google Drive/Audio",
+                "~/Audio Hijack"
+            ],
             "output_base_path": "./organized_talks",
             "speakers_path": "./organized_talks/speakers",
             "talks_path": "./organized_talks/talks",
@@ -448,22 +450,15 @@ class AudioFileManager:
             since_date = self.get_last_run_date()
             logging.info(f"Processing files modified since: {since_date}")
         
-        # Find audio files from all sources
+        # Find audio files from all input sources
         all_files = []
-        
-        # Google Drive files
-        google_drive_path = self.config.get("google_drive_path")
-        if google_drive_path:
-            google_files = self.find_audio_files(google_drive_path, since_date)
-            all_files.extend(google_files)
-            logging.info(f"Found {len(google_files)} files in Google Drive")
-        
-        # Local Audio Hijack files
-        local_audio_path = self.config.get("local_audio_path")
-        if local_audio_path:
-            local_files = self.find_audio_files(local_audio_path, since_date)
-            all_files.extend(local_files)
-            logging.info(f"Found {len(local_files)} files in local storage")
+
+        # Process each audio input directory
+        audio_inputs = self.config.get("audio_inputs", [])
+        for input_path in audio_inputs:
+            input_files = self.find_audio_files(input_path, since_date)
+            all_files.extend(input_files)
+            logging.info(f"Found {len(input_files)} files in {input_path}")
         
         if not all_files:
             logging.info("No new audio files found to process")
