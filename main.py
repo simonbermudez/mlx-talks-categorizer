@@ -250,7 +250,7 @@ class Transcriber:
         try:
             base_url = self.title_config.get("ollama_base_url", "http://localhost:11434")
             model = self.title_config.get("ollama_model", "llama3.2:3b")
-            max_words = self.title_config.get("max_title_words", 3)
+            max_words = self.title_config.get("max_title_words", 6)
 
             # Create a focused prompt for title generation
             prompt = f"""Based on this transcript, create a concise {max_words}-word title that captures the main topic or theme.
