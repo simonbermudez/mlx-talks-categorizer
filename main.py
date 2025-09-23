@@ -36,13 +36,20 @@ except ImportError:
     MLX_AVAILABLE = False
     print("Warning: MLX not available. Falling back to CPU processing.")
 
-# Whisper for transcription
+# MLX Whisper for transcription (Apple Silicon optimized)
 try:
-    import whisper
-    WHISPER_AVAILABLE = True
+    import mlx_whisper
+    MLX_WHISPER_AVAILABLE = True
 except ImportError:
-    WHISPER_AVAILABLE = False
-    print("Warning: Whisper not available. Install with: pip install openai-whisper")
+    MLX_WHISPER_AVAILABLE = False
+    # Fallback to regular Whisper
+    try:
+        import whisper
+        WHISPER_AVAILABLE = True
+        print("Warning: MLX Whisper not available. Using regular Whisper. Install MLX Whisper with: pip install mlx-whisper")
+    except ImportError:
+        WHISPER_AVAILABLE = False
+        print("Warning: Neither MLX Whisper nor regular Whisper available. Install with: pip install mlx-whisper")
 
 # Speaker identification
 from sklearn.metrics.pairwise import cosine_similarity
@@ -67,7 +74,7 @@ class Config:
             "transcripts_path": "./organized_talks/transcripts",
             "raw_talks_path": "./organized_talks/raw talks",
             "last_run_file": "last_run.json",
-            "whisper_model": "medium",
+            "whisper_model": "medium",  # Uses MLX-optimized models when available
             "speaker_similarity_threshold": 0.85,
             "cleanup_days": 30,
             "title_generation": {
@@ -180,24 +187,60 @@ class Transcriber:
         self.config = config
         self.model = None
         self.title_config = config.get("title_generation", {})
+        self.use_mlx = False
 
-        if WHISPER_AVAILABLE:
+        # Try MLX Whisper first for Apple Silicon optimization
+        if MLX_WHISPER_AVAILABLE:
+            try:
+                model_name = config.get("whisper_model", "medium")
+                # MLX Whisper uses different model naming convention
+                mlx_model_name = self._convert_to_mlx_model_name(model_name)
+                # For MLX Whisper, we store the model name rather than loading it
+                self.model = mlx_model_name
+                self.use_mlx = True
+                logging.info(f"Configured MLX Whisper model: {mlx_model_name} (Apple Silicon optimized)")
+            except Exception as e:
+                logging.error(f"Error configuring MLX Whisper model: {e}")
+                self.model = None
+
+        # Fallback to regular Whisper if MLX Whisper failed or unavailable
+        if self.model is None and WHISPER_AVAILABLE:
             try:
                 model_name = config.get("whisper_model", "medium")
                 self.model = whisper.load_model(model_name)
-                logging.info(f"Loaded Whisper model: {model_name}")
+                logging.info(f"Loaded regular Whisper model: {model_name}")
             except Exception as e:
-                logging.error(f"Error loading Whisper model: {e}")
+                logging.error(f"Error loading regular Whisper model: {e}")
+
+    def _convert_to_mlx_model_name(self, model_name: str) -> str:
+        """Convert regular Whisper model name to MLX Whisper format."""
+        # MLX Whisper uses community models from Hugging Face
+        mlx_model_mapping = {
+            "tiny": "mlx-community/whisper-tiny",
+            "base": "mlx-community/whisper-base",
+            "small": "mlx-community/whisper-small",
+            "medium": "mlx-community/whisper-medium",
+            "large": "mlx-community/whisper-large-v2",
+            "large-v2": "mlx-community/whisper-large-v2",
+            "large-v3": "mlx-community/whisper-large-v3"
+        }
+        return mlx_model_mapping.get(model_name, f"mlx-community/whisper-{model_name}")
     
     def transcribe_audio(self, file_path: str) -> Optional[str]:
         """Transcribe audio file to text."""
         if not self.model:
             logging.error("Whisper model not available")
             return None
-        
+
         try:
-            result = self.model.transcribe(file_path)
-            return result["text"].strip()
+            if self.use_mlx:
+                # MLX Whisper transcription
+                result = mlx_whisper.transcribe(file_path, path_or_hf_repo=self.model)
+                return result["text"].strip()
+            else:
+                # Regular Whisper transcription
+                result = self.model.transcribe(file_path)
+                return result["text"].strip()
         except Exception as e:
             logging.error(f"Error transcribing {file_path}: {e}")
             return None
