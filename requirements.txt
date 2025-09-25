@@ -61,3 +61,4 @@ torch==2.8.0
 tqdm==4.67.1
 typing_extensions==4.14.1
 urllib3==2.5.0
+fastdtw==0.3.4
