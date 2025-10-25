@@ -19,9 +19,9 @@
   "speaker_similarity_threshold": 0.85,
   "cleanup_days": 30,
   "title_generation": {
-    "method": "ollama",
-    "ollama_base_url": "http://localhost:11434",
-    "ollama_model": "gemma3:4b",
+    "method": "openai",
+    "openai_api_key": "",
+    "openai_model": "gpt-4o-mini",
     "max_title_words": 6,
     "fallback_to_simple": false
   }

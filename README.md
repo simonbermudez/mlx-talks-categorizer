@@ -29,7 +29,7 @@ The MLX Talks Categorizer is designed to solve the challenge of managing large v
 - **MLX** - Apple Silicon optimization framework
 - **MLX Whisper** - Optimized speech-to-text transcription for Apple Silicon
 - **OpenAI Whisper** - Fallback speech-to-text transcription
-- **Ollama** - Local LLM inference for intelligent title generation
+- **OpenAI ChatGPT** - AI-powered intelligent title generation
 - **librosa** - Audio analysis and feature extraction
 - **scikit-learn** - Machine learning algorithms for speaker identification
 - **ffmpeg** - Audio format support and processing
@@ -137,11 +137,11 @@ Edit `config.json` to customize behavior:
   "speaker_similarity_threshold": 0.85,           // Speaker matching threshold
   "cleanup_days": 30,                              // Days before cleanup
   "title_generation": {                            // Title generation configuration
-    "method": "ollama",                            // Method: "ollama" or "simple"
-    "ollama_base_url": "http://localhost:11434",  // Ollama server URL
-    "ollama_model": "llama3.2:3b",                // Ollama model to use
+    "method": "openai",                           // Method: "openai" or "simple"
+    "openai_api_key": "",                         // Your OpenAI API key
+    "openai_model": "gpt-4o-mini",                // OpenAI model to use
     "max_title_words": 3,                         // Maximum words in generated titles
-    "fallback_to_simple": true                    // Fallback to simple method if Ollama fails
+    "fallback_to_simple": true                    // Fallback to simple method if API fails
   }
 }
 ```
@@ -154,57 +154,48 @@ Edit `config.json` to customize behavior:
 - **speaker_similarity_threshold**: Cosine similarity threshold (0.0-1.0) for speaker matching
 - **cleanup_days**: Automatically removes files from raw talks older than this
 - **title_generation**: Configuration for AI-powered title generation
-  - **method**: Use "ollama" for LLM-generated titles or "simple" for keyword extraction
-  - **ollama_base_url**: URL of your Ollama server (default: http://localhost:11434)
-  - **ollama_model**: Ollama model to use (e.g., llama3.2:3b, mistral, etc.)
+  - **method**: Use "openai" for ChatGPT-generated titles or "simple" for keyword extraction
+  - **openai_api_key**: Your OpenAI API key (required for AI title generation)
+  - **openai_model**: OpenAI model to use (e.g., gpt-4o-mini, gpt-4o, gpt-4-turbo)
   - **max_title_words**: Maximum number of words in generated titles
-  - **fallback_to_simple**: Whether to use simple method if Ollama fails
+  - **fallback_to_simple**: Whether to use simple method if OpenAI API fails
 
-## 🤖 Ollama Setup for AI Title Generation
+## 🤖 OpenAI ChatGPT Setup for AI Title Generation
 
-### Installing Ollama
+### Getting Your OpenAI API Key
 
-1. **Install Ollama** on macOS:
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-```
+1. **Sign up for OpenAI** at [platform.openai.com](https://platform.openai.com)
+2. **Navigate to API Keys**: Go to your account settings → API Keys
+3. **Create a new API key**: Click "Create new secret key"
+4. **Copy and save**: Copy the key immediately (you won't be able to see it again)
+5. **Add to config.json**: Paste the key into the `openai_api_key` field
 
-2. **Start Ollama server**:
-```bash
-ollama serve
-```
+### OpenAI Configuration
 
-3. **Pull a model** (recommended models):
-```bash
-# Lightweight and fast
-ollama pull llama3.2:3b
+The system uses OpenAI ChatGPT to generate intelligent, context-aware titles from transcript content. Configure in `config.json`:
 
-# More capable but slower
-ollama pull llama3.2:8b
-
-# Alternative models
-ollama pull mistral
-ollama pull phi3
-```
-
-### Ollama Configuration
-
-The system uses Ollama to generate intelligent, context-aware titles from transcript content. Configure in `config.json`:
-
-- **ollama_base_url**: Default is `http://localhost:11434`
-- **ollama_model**: Choose based on your hardware:
-  - `llama3.2:3b` - Fast, good for most uses (2GB RAM)
-  - `llama3.2:8b` - Better quality (5GB RAM)
-  - `mistral` - Alternative option
+- **openai_api_key**: Your OpenAI API key (required)
+- **openai_model**: Choose based on your needs and budget:
+  - `gpt-4o-mini` - Fast and cost-effective, excellent quality (recommended)
+  - `gpt-4o` - Higher quality, more expensive
+  - `gpt-4-turbo` - Very high quality, most expensive
 - **fallback_to_simple**: Recommended `true` for reliability
 
 ### Title Generation Features
 
-- **AI-Powered**: Uses LLM understanding to create meaningful titles
+- **AI-Powered**: Uses GPT understanding to create meaningful, accurate titles
 - **Context-Aware**: Analyzes full transcript for thematic understanding
 - **Configurable Length**: Set `max_title_words` to control title length
-- **Automatic Fallback**: Falls back to keyword extraction if Ollama unavailable
-- **Error Handling**: Robust handling of network issues and timeouts
+- **Automatic Fallback**: Falls back to keyword extraction if API fails
+- **Error Handling**: Robust handling of network issues and API errors
+
+### Cost Considerations
+
+OpenAI ChatGPT API is usage-based:
+- **gpt-4o-mini**: ~$0.00015 per audio file (most cost-effective)
+- **gpt-4o**: ~$0.0015 per audio file
+- Processing uses only the first 1000 characters of each transcript
+- See [OpenAI Pricing](https://openai.com/pricing) for current rates
 
 ## 🎤 Speaker Identification Setup
 
@@ -299,7 +290,7 @@ For detailed setup instructions, see [SETUP_CRONJOB.md](SETUP_CRONJOB.md).
 - Uses MLX Whisper for Apple Silicon optimized speech-to-text conversion (30-40% faster)
 - Falls back to OpenAI Whisper if MLX Whisper unavailable
 - Supports multiple model sizes for speed/accuracy trade-offs
-- Generates intelligent titles from transcript content using Ollama LLMs
+- Generates intelligent titles from transcript content using OpenAI ChatGPT
 - Filters common stop words for meaningful descriptions
 
 ### 4. Speaker Identification
@@ -406,15 +397,16 @@ pip install -r requirements.txt
 
 **Memory Issues**
 - Use smaller Whisper model (`small` or `base`)
-- Use smaller Ollama model (`llama3.2:3b` instead of `8b`)
+- Use faster OpenAI model (`gpt-4o-mini` instead of `gpt-4o`)
 - Process files in smaller batches
 - Monitor system memory during large operations
 
-**Ollama Connection Issues**
-- Verify Ollama is running: `ollama list`
-- Check server status: `curl http://localhost:11434/api/version`
-- Ensure model is pulled: `ollama pull llama3.2:3b`
-- Check `ollama_base_url` in config.json
+**OpenAI API Issues**
+- Verify API key is correctly set in config.json
+- Check API key has billing enabled at [OpenAI Platform](https://platform.openai.com/account/billing)
+- Ensure you have sufficient API credits
+- Check network connectivity
+- Review error logs for specific API error messages
 
 **MLX Whisper Issues**
 - If seeing "FP16 is not supported on CPU" warning, install MLX Whisper: `pip install mlx-whisper`

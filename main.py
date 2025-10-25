@@ -21,6 +21,7 @@ import numpy as np
 # Title Generation
 import requests
 import json
+from openai import OpenAI
 
 # Video processing for MP4 files
 import subprocess
@@ -86,9 +87,9 @@ class Config:
             "voice_activity_zcr_percentile": 70,  # ZCR threshold percentile
             "cleanup_days": 30,
             "title_generation": {
-                "method": "ollama",
-                "ollama_base_url": "http://localhost:11434",
-                "ollama_model": "llama3.2:3b",
+                "method": "openai",
+                "openai_api_key": "",
+                "openai_model": "gpt-4o-mini",
                 "max_title_words": 3,
                 "fallback_to_simple": True
             },
@@ -306,7 +307,7 @@ class AudioProcessor:
 
 
 class Transcriber:
-    """Handles audio transcription using Whisper and title generation using Ollama."""
+    """Handles audio transcription using Whisper and title generation using OpenAI ChatGPT."""
 
     def __init__(self, config: Config):
         self.config = config
@@ -370,67 +371,58 @@ class Transcriber:
             logging.error(f"Error transcribing {file_path}: {e}")
             return None
     
-    def generate_ollama_title(self, transcript: str) -> Optional[str]:
-        """Generate title using Ollama LLM."""
+    def generate_openai_title(self, transcript: str) -> Optional[str]:
+        """Generate title using OpenAI ChatGPT API."""
         try:
-            base_url = self.title_config.get("ollama_base_url", "http://localhost:11434")
-            model = self.title_config.get("ollama_model", "llama3.2:3b")
+            api_key = self.title_config.get("openai_api_key", "")
+            model = self.title_config.get("openai_model", "gpt-4o-mini")
             max_words = self.title_config.get("max_title_words", 6)
+
+            if not api_key:
+                logging.error("OpenAI API key not configured")
+                return None
+
+            # Initialize OpenAI client
+            client = OpenAI(api_key=api_key)
 
             # Create a focused prompt for title generation
             prompt = f"""Based on this transcript, create a concise {max_words}-word title that captures the main topic or theme.
 
-            Transcript: {transcript[:1000]}...
+Transcript: {transcript[:1000]}...
 
-            Respond with only the {max_words}-word title, no explanations or additional text."""
+Respond with only the {max_words}-word title, no explanations or additional text."""
 
-            payload = {
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.3,
-                    "top_p": 0.9,
-                    "num_predict": 20
-                }
-            }
-
-            response = requests.post(
-                f"{base_url}/api/generate",
-                json=payload,
-                timeout=30
+            # Make API call to OpenAI
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that generates concise, descriptive titles from audio transcripts."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=20,
+                top_p=0.9
             )
 
-            if response.status_code == 200:
-                result = response.json()
-                title = result.get("response", "").strip()
+            title = response.choices[0].message.content.strip()
 
-                # Clean up the title - remove quotes, periods, etc.
-                title = title.strip('"\'.,!?')
+            # Clean up the title - remove quotes, periods, etc.
+            title = title.strip('"\'.,!?')
 
-                # Ensure it's roughly the right length
-                words = title.split()
-                if len(words) > max_words:
-                    title = " ".join(words[:max_words])
+            # Ensure it's roughly the right length
+            words = title.split()
+            if len(words) > max_words:
+                title = " ".join(words[:max_words])
 
-                if title:
-                    logging.info(f"Generated Ollama title: {title}")
-                    return title.title()
-                else:
-                    logging.warning("Ollama returned empty title")
-                    return None
+            if title:
+                logging.info(f"Generated OpenAI title: {title}")
+                return title.title()
             else:
-                logging.error(f"Ollama API error: {response.status_code} - {response.text}")
+                logging.warning("OpenAI returned empty title")
                 return None
 
-        except requests.exceptions.ConnectionError:
-            logging.warning("Could not connect to Ollama server")
-            return None
-        except requests.exceptions.Timeout:
-            logging.warning("Ollama request timed out")
-            return None
         except Exception as e:
-            logging.error(f"Error generating Ollama title: {e}")
+            logging.error(f"Error generating OpenAI title: {e}")
             return None
 
     def generate_simple_title(self, transcript: str) -> str:
@@ -457,8 +449,8 @@ class Transcriber:
         method = self.title_config.get("method", "simple")
         fallback = self.title_config.get("fallback_to_simple", True)
 
-        if method == "ollama":
-            title = self.generate_ollama_title(transcript)
+        if method == "openai":
+            title = self.generate_openai_title(transcript)
             if title:
                 return title
             elif fallback:

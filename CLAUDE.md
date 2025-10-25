@@ -9,7 +9,7 @@ This is an Audio File Management Specialist project designed to organize, rename
 - Aggregate MP3/WAV/MP4 files from multiple configured input directories (supports unlimited sources)
 - Filter files that are 10+ minutes in duration
 - Transcribe audio files for context understanding
-- Generate intelligent titles using Ollama LLMs or simple keyword extraction
+- Generate intelligent titles using OpenAI ChatGPT or simple keyword extraction
 - Identify speakers using voice samples
 - Organize files into a structured directory system
 - Automate regular updates and archiving
@@ -36,7 +36,7 @@ raw talks/                            # Unprocessed audio files
 - **MLX Optimization**: Workflow must be optimized for Apple Silicon
 - **Speaker Identification**: Use sample voices to train speaker recognition
 - **Transcription**: Generate and save transcripts alongside audio files
-- **Title Generation**: Use Ollama LLMs for intelligent, context-aware file naming
+- **Title Generation**: Use OpenAI ChatGPT for intelligent, context-aware file naming
 - **Incremental Processing**: Track last successful run date to process only new files
 - **Cleanup**: Monthly deletion of junk files
 
