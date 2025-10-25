@@ -31,9 +31,9 @@ pip install -r requirements.txt
 ```
 
 This will install:
-- `pyannote.audio==3.1.1`
-- `pyannote.core==5.0.0`
-- And all dependencies (PyTorch, etc.)
+- `pyannote.audio==4.0.1`
+- `pyannote.core==6.0.1`
+- And all dependencies (PyTorch, NumPy 2.0+, etc.)
 
 ---
 
