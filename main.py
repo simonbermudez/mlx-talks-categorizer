@@ -429,8 +429,56 @@ class SpeakerIdentifier:
                             logging.error(f"Failed to extract audio from {sample_file}: {result.stderr}")
                             continue
 
-                    # Run diarization to get embedding
+                    # Run diarization to extract speaker segments
                     diarization = self.diarization_pipeline(audio_file)
+
+                    # Extract embedding from the dominant speaker in the sample
+                    speaker_durations = {}
+                    for turn, _, speaker in diarization.itertracks(yield_label=True):
+                        duration = turn.end - turn.start
+                        speaker_durations[speaker] = speaker_durations.get(speaker, 0) + duration
+
+                    if speaker_durations:
+                        # Get the dominant speaker from the sample
+                        dominant_speaker = max(speaker_durations, key=speaker_durations.get)
+
+                        # Extract embedding for this speaker
+                        from pyannote.audio import Inference
+                        # Access the embedding model from the pipeline
+                        embedding_model = Inference(
+                            self.diarization_pipeline._embedding,
+                            window="whole"
+                        )
+                        # Move to same device as pipeline
+                        import torch
+                        if torch.backends.mps.is_available():
+                            embedding_model.to(torch.device("mps"))
+                        elif torch.cuda.is_available():
+                            embedding_model.to(torch.device("cuda"))
+
+                        # Get all segments for the dominant speaker
+                        speaker_segments = [turn for turn, _, spk in diarization.itertracks(yield_label=True) if spk == dominant_speaker]
+
+                        if speaker_segments:
+                            # Extract embeddings for all segments and average them
+                            embeddings = []
+                            for segment in speaker_segments[:5]:  # Use up to 5 segments
+                                emb = embedding_model.crop(audio_file, segment)
+                                embeddings.append(emb.numpy())
+
+                            # Average embeddings
+                            import numpy as np
+                            avg_embedding = np.mean(embeddings, axis=0)
+
+                            # Store the averaged embedding
+                            self.speaker_embeddings[speaker_name] = avg_embedding
+                            logging.info(f"Successfully enrolled speaker: {speaker_name} (embedding shape: {avg_embedding.shape})")
+                        else:
+                            logging.warning(f"No segments found for speaker {speaker_name}")
+                            continue
+                    else:
+                        logging.warning(f"No speakers detected in sample for {speaker_name}")
+                        continue
 
                     # Clean up temp file if created
                     if temp_file:
@@ -439,11 +487,6 @@ class SpeakerIdentifier:
                             os.unlink(temp_file.name)
                         except:
                             pass
-
-                    # Store the first speaker's embedding as reference
-                    # This is a simplified approach - in production you'd want more sophisticated enrollment
-                    self.speaker_embeddings[speaker_name] = sample_file
-                    logging.info(f"Successfully enrolled speaker: {speaker_name}")
 
                 except Exception as e:
                     logging.error(f"Error enrolling speaker {speaker_name}: {e}")
@@ -478,9 +521,29 @@ class SpeakerIdentifier:
         try:
             logging.debug(f"Running speaker diarization on: {audio_file}")
 
+            # Extract audio from MP4 if needed
+            processing_file = audio_file
+            temp_file = None
+            if audio_file.lower().endswith('.mp4'):
+                import tempfile
+                temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                temp_file.close()
+
+                result = subprocess.run([
+                    'ffmpeg', '-i', audio_file, '-vn', '-acodec', 'pcm_s16le',
+                    '-ar', '16000', '-ac', '1', '-y', temp_file.name
+                ], capture_output=True, text=True, timeout=60)
+
+                if result.returncode == 0:
+                    processing_file = temp_file.name
+                    logging.debug(f"Extracted audio from {audio_file} for identification")
+                else:
+                    logging.error(f"Failed to extract audio from {audio_file}: {result.stderr}")
+                    return "Miscellaneous Speakers"
+
             # Run diarization on the audio file
             diarization = self.diarization_pipeline(
-                audio_file,
+                processing_file,
                 min_speakers=self.min_speakers,
                 max_speakers=self.max_speakers
             )
@@ -504,34 +567,89 @@ class SpeakerIdentifier:
             logging.info(f"Detected {len(speaker_durations)} speaker(s)")
             logging.info(f"Dominant speaker: {dominant_speaker_id} ({dominance_ratio*100:.1f}% of audio)")
 
-            # For now, if we have enrolled speakers, return the first one
-            # In a full implementation, you'd compare embeddings to match speakers
-            # This is a simplified version - see note below
-            threshold = self.config.get("speaker_similarity_threshold", 0.5)
+            # Extract embedding for the dominant speaker
+            from pyannote.audio import Inference
+            import numpy as np
 
-            if dominance_ratio >= threshold:
-                # In a production system, you would:
-                # 1. Extract embedding for the detected speaker
-                # 2. Compare it to enrolled speaker embeddings
-                # 3. Return the best match above threshold
+            # Access the embedding model from the pipeline
+            embedding_model = Inference(
+                self.diarization_pipeline._embedding,
+                window="whole"
+            )
+            # Move to same device as pipeline
+            import torch
+            if torch.backends.mps.is_available():
+                embedding_model.to(torch.device("mps"))
+            elif torch.cuda.is_available():
+                embedding_model.to(torch.device("cuda"))
 
-                # For now, we return the first enrolled speaker if dominant
-                # This is a placeholder - needs proper embedding comparison
-                if len(self.speaker_embeddings) == 1:
-                    matched_speaker = list(self.speaker_embeddings.keys())[0]
-                    logging.info(f"Matched to enrolled speaker: {matched_speaker}")
-                    return matched_speaker
-                else:
-                    logging.info("Multiple speakers enrolled - need embedding comparison (not yet implemented)")
-                    return "Miscellaneous Speakers"
+            # Get segments for the dominant speaker
+            dominant_segments = [turn for turn, _, spk in diarization.itertracks(yield_label=True) if spk == dominant_speaker_id]
+
+            if not dominant_segments:
+                logging.warning("No segments found for dominant speaker")
+                return "Miscellaneous Speakers"
+
+            # Extract embeddings and average
+            unknown_embeddings = []
+            for segment in dominant_segments[:5]:  # Use up to 5 segments
+                emb = embedding_model.crop(processing_file, segment)
+                unknown_embeddings.append(emb.numpy())
+
+            unknown_embedding = np.mean(unknown_embeddings, axis=0)
+            logging.debug(f"Extracted embedding for unknown speaker (shape: {unknown_embedding.shape})")
+
+            # Compare to enrolled speakers using cosine similarity
+            from sklearn.metrics.pairwise import cosine_similarity
+
+            best_match = None
+            best_similarity = -1
+
+            for speaker_name, enrolled_embedding in self.speaker_embeddings.items():
+                # Calculate cosine similarity
+                similarity = cosine_similarity(
+                    unknown_embedding.reshape(1, -1),
+                    enrolled_embedding.reshape(1, -1)
+                )[0][0]
+
+                logging.debug(f"Similarity with {speaker_name}: {similarity:.3f}")
+
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    best_match = speaker_name
+
+            # Check if best match is above threshold
+            threshold = self.config.get("speaker_similarity_threshold", 0.85)
+
+            # Clean up temp file if created
+            if temp_file:
+                import os
+                try:
+                    os.unlink(temp_file.name)
+                except:
+                    pass
+
+            if best_match and best_similarity >= threshold:
+                logging.info(f"Matched to speaker: {best_match} (similarity: {best_similarity:.3f})")
+                return best_match
             else:
-                logging.info(f"No dominant speaker found (threshold: {threshold})")
+                if best_match:
+                    logging.info(f"Best match: {best_match} (similarity: {best_similarity:.3f}) below threshold ({threshold})")
+                else:
+                    logging.info("No speaker match found")
                 return "Miscellaneous Speakers"
 
         except Exception as e:
             logging.error(f"Error identifying speaker from {audio_file}: {e}")
             import traceback
             logging.debug(traceback.format_exc())
+            # Clean up temp file if it exists
+            if 'temp_file' in locals() and temp_file:
+                try:
+                    import os
+                    os.unlink(temp_file.name)
+                except:
+                    pass
             return "Miscellaneous Speakers"
 
 
