@@ -18,6 +18,7 @@
   "whisper_model": "medium",
   "speaker_similarity_threshold": 0.5,
   "cleanup_days": 30,
+  "log_level": "DEBUG",
   "title_generation": {
     "method": "openai",
     "openai_api_key": "",

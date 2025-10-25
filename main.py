@@ -69,6 +69,7 @@ class Config:
             "whisper_model": "medium",  # Uses MLX-optimized models when available
             "speaker_similarity_threshold": 0.5,  # Eagle similarity threshold (0-1 range)
             "cleanup_days": 30,
+            "log_level": "INFO",  # Logging level: DEBUG, INFO, WARNING, ERROR
             "title_generation": {
                 "method": "openai",
                 "openai_api_key": "",
@@ -344,13 +345,29 @@ class SpeakerIdentifier:
     def _read_audio_file(self, file_path: str, sample_rate: int) -> Optional[np.ndarray]:
         """Read audio file and resample to Eagle's sample rate."""
         try:
-            # Load audio using librosa
+            # Load audio using librosa - returns float32 in range [-1, 1]
             audio, _ = librosa.load(file_path, sr=sample_rate, mono=True)
-            # Convert to int16 format expected by Eagle
+
+            # Ensure audio is not empty
+            if len(audio) == 0:
+                logging.error(f"Audio file is empty: {file_path}")
+                return None
+
+            # Normalize to prevent clipping
+            max_val = np.max(np.abs(audio))
+            if max_val > 0:
+                audio = audio / max_val
+
+            # Convert to int16 format expected by Eagle (range: -32768 to 32767)
+            # Use 32767 to avoid overflow when converting to int16
             audio_int16 = (audio * 32767).astype(np.int16)
+
+            logging.debug(f"Loaded audio: {len(audio_int16)} samples at {sample_rate}Hz")
             return audio_int16
         except Exception as e:
             logging.error(f"Error reading audio file {file_path}: {e}")
+            import traceback
+            logging.debug(traceback.format_exc())
             return None
 
     def _enroll_speaker(self, speaker_name: str, audio_files: List[str]) -> Optional[bytes]:
@@ -366,8 +383,10 @@ class SpeakerIdentifier:
             eagle_profiler = pveagle.create_profiler(**profiler_kwargs)
 
             logging.info(f"Enrolling speaker: {speaker_name} with {len(audio_files)} sample(s)")
+            logging.debug(f"Eagle profiler sample rate: {eagle_profiler.sample_rate}Hz")
 
             # Enroll with each audio file
+            enrollment_percentage = 0.0
             for audio_file in audio_files:
                 audio = self._read_audio_file(audio_file, eagle_profiler.sample_rate)
                 if audio is None:
@@ -375,23 +394,40 @@ class SpeakerIdentifier:
                     continue
 
                 # Enroll the audio
-                enroll_percentage, feedback = eagle_profiler.enroll(audio)
-                logging.info(f"  {Path(audio_file).name}: {enroll_percentage:.1f}% - {feedback}")
+                try:
+                    enrollment_percentage, feedback = eagle_profiler.enroll(audio)
+                    logging.info(f"  {Path(audio_file).name}: {enrollment_percentage:.1f}% - {feedback}")
+
+                    # Check if enrollment is complete
+                    if enrollment_percentage >= 100.0:
+                        break
+                except Exception as e:
+                    logging.error(f"Error enrolling audio file {audio_file}: {e}")
+                    import traceback
+                    logging.debug(traceback.format_exc())
+                    continue
 
             # Export profile if enrollment is sufficient
+            if enrollment_percentage < 100.0:
+                logging.warning(f"Enrollment incomplete for {speaker_name}: {enrollment_percentage:.1f}%")
+                logging.warning(f"Need {100.0 - enrollment_percentage:.1f}% more audio for complete enrollment")
+                eagle_profiler.delete()
+                return None
+
             try:
                 speaker_profile = eagle_profiler.export()
                 eagle_profiler.delete()
-                logging.info(f"Successfully enrolled speaker: {speaker_name}")
+                logging.info(f"Successfully enrolled speaker: {speaker_name} with {enrollment_percentage:.1f}% completion")
                 return speaker_profile
             except Exception as e:
                 logging.error(f"Failed to export profile for {speaker_name}: {e}")
-                logging.error("Enrollment may be incomplete. Provide more audio samples.")
                 eagle_profiler.delete()
                 return None
 
         except Exception as e:
             logging.error(f"Error enrolling speaker {speaker_name}: {e}")
+            import traceback
+            logging.debug(traceback.format_exc())
             return None
 
     def load_speaker_samples(self):
@@ -460,6 +496,8 @@ class SpeakerIdentifier:
             frame_length = self.eagle_recognizer.frame_length
             num_frames = len(audio) // frame_length
 
+            logging.debug(f"Audio length: {len(audio)} samples, Frame length: {frame_length}, Num frames: {num_frames}")
+
             if num_frames == 0:
                 logging.warning(f"Audio file too short for Eagle processing: {audio_file}")
                 return "Miscellaneous Speakers"
@@ -471,11 +509,18 @@ class SpeakerIdentifier:
                 scores = self.eagle_recognizer.process(frame)
                 all_scores.append(scores)
 
+                # Log first few frame scores for debugging
+                if i < 3:
+                    logging.debug(f"Frame {i} scores: {scores}")
+
             # Average scores across frames
             avg_scores = np.mean(all_scores, axis=0)
 
             # Get speaker names in the same order as profiles
             speaker_names = list(self.speaker_profiles.keys())
+
+            # Log all speaker scores
+            logging.debug(f"Average scores for all speakers: {dict(zip(speaker_names, avg_scores))}")
 
             # Find best match
             best_idx = np.argmax(avg_scores)
@@ -489,10 +534,15 @@ class SpeakerIdentifier:
                 return best_speaker
             else:
                 logging.info(f"Best match {best_speaker} below threshold (score: {best_score:.3f}, threshold: {threshold})")
+                # Log all scores for debugging
+                for name, score in zip(speaker_names, avg_scores):
+                    logging.debug(f"  {name}: {score:.3f}")
                 return "Miscellaneous Speakers"
 
         except Exception as e:
             logging.error(f"Error identifying speaker from {audio_file}: {e}")
+            import traceback
+            logging.debug(traceback.format_exc())
             return "Miscellaneous Speakers"
 
 
@@ -566,14 +616,19 @@ class AudioFileManager:
     
     def setup_logging(self):
         """Setup logging configuration."""
+        # Get log level from config (default to INFO)
+        log_level_str = self.config.get("log_level", "INFO").upper()
+        log_level = getattr(logging, log_level_str, logging.INFO)
+
         logging.basicConfig(
-            level=logging.INFO,
+            level=log_level,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
                 logging.FileHandler('audio_manager.log'),
                 logging.StreamHandler()
             ]
         )
+        logging.info(f"Logging level set to: {log_level_str}")
     
     def get_last_run_date(self) -> datetime:
         """Get the date of the last successful run."""
