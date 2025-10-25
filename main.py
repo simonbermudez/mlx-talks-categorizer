@@ -198,17 +198,18 @@ class Transcriber:
 
     def _convert_to_mlx_model_name(self, model_name: str) -> str:
         """Convert regular Whisper model name to MLX Whisper format."""
-        # MLX Whisper uses community models from Hugging Face
+        # MLX Whisper uses community models from Hugging Face with -mlx suffix
         mlx_model_mapping = {
-            "tiny": "mlx-community/whisper-tiny",
-            "base": "mlx-community/whisper-base",
-            "small": "mlx-community/whisper-small",
-            "medium": "mlx-community/whisper-medium",
-            "large": "mlx-community/whisper-large-v2",
-            "large-v2": "mlx-community/whisper-large-v2",
-            "large-v3": "mlx-community/whisper-large-v3"
+            "tiny": "mlx-community/whisper-tiny-mlx",
+            "base": "mlx-community/whisper-base-mlx",
+            "small": "mlx-community/whisper-small-mlx",
+            "medium": "mlx-community/whisper-medium-mlx",
+            "large": "mlx-community/whisper-large-v3-mlx",
+            "large-v2": "mlx-community/whisper-large-v2-mlx",
+            "large-v3": "mlx-community/whisper-large-v3-mlx",
+            "large-v3-turbo": "mlx-community/whisper-large-v3-turbo"
         }
-        return mlx_model_mapping.get(model_name, f"mlx-community/whisper-{model_name}")
+        return mlx_model_mapping.get(model_name, f"mlx-community/whisper-{model_name}-mlx")
     
     def transcribe_audio(self, file_path: str) -> Optional[str]:
         """Transcribe audio file to text."""
