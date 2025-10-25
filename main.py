@@ -171,6 +171,7 @@ class Transcriber:
         self.model = None
         self.title_config = config.get("title_generation", {})
         self.use_mlx = False
+        self.hf_token = config.get("pyannote", {}).get("hf_token", "")
 
         # Try MLX Whisper first for Apple Silicon optimization
         if MLX_WHISPER_AVAILABLE:
@@ -217,7 +218,11 @@ class Transcriber:
 
         try:
             if self.use_mlx:
-                # MLX Whisper transcription
+                # MLX Whisper transcription with HF token for model download
+                if self.hf_token:
+                    # Set HF token for model downloads
+                    import os
+                    os.environ['HF_TOKEN'] = self.hf_token
                 result = mlx_whisper.transcribe(file_path, path_or_hf_repo=self.model)
                 return result["text"].strip()
             else:
@@ -402,8 +407,37 @@ class SpeakerIdentifier:
                 sample_file = files[0]
 
                 try:
+                    # Extract audio from MP4 if needed
+                    audio_file = sample_file
+                    temp_file = None
+                    if sample_file.lower().endswith('.mp4'):
+                        # Extract audio to temporary WAV file
+                        import tempfile
+                        temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                        temp_file.close()
+
+                        result = subprocess.run([
+                            'ffmpeg', '-i', sample_file, '-vn', '-acodec', 'pcm_s16le',
+                            '-ar', '16000', '-ac', '1', '-y', temp_file.name
+                        ], capture_output=True, text=True, timeout=60)
+
+                        if result.returncode == 0:
+                            audio_file = temp_file.name
+                            logging.debug(f"Extracted audio from {sample_file} to {audio_file}")
+                        else:
+                            logging.error(f"Failed to extract audio from {sample_file}: {result.stderr}")
+                            continue
+
                     # Run diarization to get embedding
-                    diarization = self.diarization_pipeline(sample_file)
+                    diarization = self.diarization_pipeline(audio_file)
+
+                    # Clean up temp file if created
+                    if temp_file:
+                        import os
+                        try:
+                            os.unlink(temp_file.name)
+                        except:
+                            pass
 
                     # Store the first speaker's embedding as reference
                     # This is a simplified approach - in production you'd want more sophisticated enrollment
@@ -412,6 +446,12 @@ class SpeakerIdentifier:
 
                 except Exception as e:
                     logging.error(f"Error enrolling speaker {speaker_name}: {e}")
+                    # Clean up temp file if it exists
+                    if 'temp_file' in locals() and temp_file:
+                        try:
+                            os.unlink(temp_file.name)
+                        except:
+                            pass
                     continue
 
             if self.speaker_embeddings:
