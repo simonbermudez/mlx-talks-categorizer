@@ -31,9 +31,13 @@ pip install -r requirements.txt
 ```
 
 This will install:
-- `pyannote.audio==4.0.1`
-- `pyannote.core==6.0.1`
+- `pyannote.audio==3.4.0`
+- `pyannote.core==5.0.0`
 - And all dependencies (PyTorch, NumPy 2.0+, etc.)
+
+**Note:** We use version 3.4.0 instead of 4.0.1+ because 4.0+ uses torchcodec which has
+compatibility issues on Apple Silicon. Version 3.4.0 supports NumPy 2.0 and works reliably
+on Apple Silicon using torchaudio.
 
 ---
 
