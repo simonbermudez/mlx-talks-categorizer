@@ -18,11 +18,18 @@
   "whisper_model": "medium",
   "speaker_similarity_threshold": 0.85,
   "cleanup_days": 30,
+  "log_level": "INFO",
   "title_generation": {
     "method": "openai",
     "openai_api_key": "",
     "openai_model": "gpt-4o-mini",
     "max_title_words": 6,
     "fallback_to_simple": false
+  },
+  "pyannote": {
+    "hf_token": "",
+    "model": "pyannote/speaker-diarization-3.1",
+    "min_speakers": 1,
+    "max_speakers": 10
   }
 }
