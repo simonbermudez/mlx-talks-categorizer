@@ -365,7 +365,17 @@ class SpeakerIdentifier:
                 self.model_name,
                 use_auth_token=self.hf_token
             )
-            logging.info("Pyannote pipeline loaded successfully")
+
+            # Enable GPU acceleration if available (MPS for Apple Silicon)
+            import torch
+            if torch.backends.mps.is_available():
+                self.diarization_pipeline.to(torch.device("mps"))
+                logging.info("Pyannote pipeline loaded successfully (using MPS GPU acceleration)")
+            elif torch.cuda.is_available():
+                self.diarization_pipeline.to(torch.device("cuda"))
+                logging.info("Pyannote pipeline loaded successfully (using CUDA GPU acceleration)")
+            else:
+                logging.info("Pyannote pipeline loaded successfully (using CPU)")
 
             # Load speaker samples from all supported formats
             supported_formats = self.config.get("supported_formats", [".mp3", ".wav", ".mp4"])
