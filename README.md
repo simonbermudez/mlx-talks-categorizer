@@ -17,9 +17,9 @@ The MLX Talks Categorizer is designed to solve the challenge of managing large v
 
 ### Core Components
 
-1. **AudioProcessor**: Handles file discovery, validation, and audio feature extraction
-2. **Transcriber**: Uses Whisper for speech-to-text conversion and description generation
-3. **SpeakerIdentifier**: MFCC-based voice recognition with cosine similarity matching
+1. **AudioProcessor**: Handles file discovery, validation, and duration checking
+2. **Transcriber**: Uses Whisper for speech-to-text conversion and AI-powered description generation
+3. **SpeakerIdentifier**: Uses Picovoice Eagle for advanced speaker recognition
 4. **FileOrganizer**: Manages directory structure and file placement
 5. **AudioFileManager**: Main orchestrator coordinating all components
 
@@ -30,8 +30,8 @@ The MLX Talks Categorizer is designed to solve the challenge of managing large v
 - **MLX Whisper** - Optimized speech-to-text transcription for Apple Silicon
 - **OpenAI Whisper** - Fallback speech-to-text transcription
 - **OpenAI ChatGPT** - AI-powered intelligent title generation
-- **librosa** - Audio analysis and feature extraction
-- **scikit-learn** - Machine learning algorithms for speaker identification
+- **Picovoice Eagle** - Advanced on-device speaker recognition engine
+- **librosa** - Audio analysis and duration checking
 - **ffmpeg** - Audio format support and processing
 
 ## 📁 Directory Structure
@@ -134,7 +134,7 @@ Edit `config.json` to customize behavior:
   "raw_talks_path": "./organized_talks/raw talks", // Backup location
   "last_run_file": "last_run.json",               // Incremental processing tracker
   "whisper_model": "medium",                       // Whisper model size
-  "speaker_similarity_threshold": 0.85,           // Speaker matching threshold
+  "speaker_similarity_threshold": 0.5,            // Eagle speaker matching threshold (0-1)
   "cleanup_days": 30,                              // Days before cleanup
   "title_generation": {                            // Title generation configuration
     "method": "openai",                           // Method: "openai" or "simple"
@@ -142,6 +142,11 @@ Edit `config.json` to customize behavior:
     "openai_model": "gpt-4o-mini",                // OpenAI model to use
     "max_title_words": 3,                         // Maximum words in generated titles
     "fallback_to_simple": true                    // Fallback to simple method if API fails
+  },
+  "picovoice": {                                   // Picovoice Eagle configuration
+    "access_key": "",                             // Your Picovoice access key
+    "model_path": null,                           // Optional custom model path
+    "library_path": null                          // Optional custom library path
   }
 }
 ```
@@ -151,7 +156,7 @@ Edit `config.json` to customize behavior:
 - **min_duration_minutes**: Only processes files longer than this duration
 - **audio_inputs**: Array of input directories to scan for audio files (supports unlimited sources)
 - **whisper_model**: Available options: `tiny`, `base`, `small`, `medium`, `large`
-- **speaker_similarity_threshold**: Cosine similarity threshold (0.0-1.0) for speaker matching
+- **speaker_similarity_threshold**: Eagle similarity threshold (0.0-1.0) for speaker matching
 - **cleanup_days**: Automatically removes files from raw talks older than this
 - **title_generation**: Configuration for AI-powered title generation
   - **method**: Use "openai" for ChatGPT-generated titles or "simple" for keyword extraction
@@ -159,16 +164,27 @@ Edit `config.json` to customize behavior:
   - **openai_model**: OpenAI model to use (e.g., gpt-4o-mini, gpt-4o, gpt-4-turbo)
   - **max_title_words**: Maximum number of words in generated titles
   - **fallback_to_simple**: Whether to use simple method if OpenAI API fails
+- **picovoice**: Configuration for Picovoice Eagle speaker recognition
+  - **access_key**: Your Picovoice access key (required for speaker identification)
+  - **model_path**: Optional path to custom Eagle model
+  - **library_path**: Optional path to custom Eagle library
 
-## 🤖 OpenAI ChatGPT Setup for AI Title Generation
+## 🔑 API Keys Setup
 
-### Getting Your OpenAI API Key
+### OpenAI ChatGPT for AI Title Generation
 
 1. **Sign up for OpenAI** at [platform.openai.com](https://platform.openai.com)
 2. **Navigate to API Keys**: Go to your account settings → API Keys
 3. **Create a new API key**: Click "Create new secret key"
 4. **Copy and save**: Copy the key immediately (you won't be able to see it again)
-5. **Add to config.json**: Paste the key into the `openai_api_key` field
+5. **Add to config.json**: Paste the key into the `title_generation.openai_api_key` field
+
+### Picovoice Eagle for Speaker Recognition
+
+1. **Sign up for Picovoice** at [console.picovoice.ai](https://console.picovoice.ai/)
+2. **Get your Access Key**: Available in your Picovoice Console dashboard
+3. **Copy the Access Key**: It will be a long string starting with your account ID
+4. **Add to config.json**: Paste the key into the `picovoice.access_key` field
 
 ### OpenAI Configuration
 
@@ -204,20 +220,25 @@ OpenAI ChatGPT API is usage-based:
 1. Record or obtain clean audio samples of each speaker (30+ seconds recommended)
 2. Save files named with the speaker's name: `John_Doe.mp3`, `Jane_Smith.wav`, or `Bob_Jones.mp4`
 3. Place in the `organized_talks/speakers/` directory
+4. For better accuracy, provide multiple samples per speaker by adding numeric suffixes: `John_Doe_1.mp3`, `John_Doe_2.mp3`
 
 ### Speaker Sample Requirements
 
-- **Duration**: 30+ seconds for better accuracy
+- **Duration**: 30+ seconds minimum (more is better for Eagle enrollment)
 - **Quality**: Clear speech, minimal background noise
 - **Format**: MP3, WAV, or MP4 (video files will extract audio automatically)
 - **Content**: Natural speech patterns representative of the speaker
+- **Multiple Samples**: Recommended to provide 2-3 samples per speaker for improved accuracy
 
-### How Speaker Identification Works
+### How Speaker Identification Works (Picovoice Eagle)
 
-1. **Feature Extraction**: Uses MFCC (Mel-Frequency Cepstral Coefficients) to extract voice characteristics
-2. **Normalization**: Applies StandardScaler for consistent feature scaling
-3. **Similarity Matching**: Calculates cosine similarity between unknown and known speaker features
-4. **Threshold Filtering**: Only matches above the configured similarity threshold
+1. **Enrollment**: Eagle Profiler analyzes speaker samples to create unique voiceprints (profiles)
+2. **Profile Creation**: Each speaker gets a profile that captures their voice characteristics
+3. **Recognition**: Eagle Recognizer compares incoming audio against enrolled profiles
+4. **Scoring**: Returns similarity scores (0-1 range) for each enrolled speaker
+5. **Threshold Filtering**: Only matches above the configured similarity threshold (default: 0.5)
+
+Eagle uses deep learning models for state-of-the-art speaker recognition accuracy, running entirely on-device for privacy.
 
 ## 📋 Usage
 
@@ -294,8 +315,9 @@ For detailed setup instructions, see [SETUP_CRONJOB.md](SETUP_CRONJOB.md).
 - Filters common stop words for meaningful descriptions
 
 ### 4. Speaker Identification
-- Compares audio features against known speaker samples
-- Uses cosine similarity for voice pattern matching
+- Uses Picovoice Eagle for deep learning-based speaker recognition
+- Compares audio against enrolled speaker profiles
+- Returns confidence scores for each known speaker
 - Applies configurable threshold for identification confidence
 - Falls back to "Miscellaneous Speakers" for unmatched speakers
 
@@ -314,7 +336,7 @@ For detailed setup instructions, see [SETUP_CRONJOB.md](SETUP_CRONJOB.md).
 **Test Results**:
 - Processing speed: ~3-4 seconds per 5-second audio file
 - Memory usage: ~500MB during processing
-- Speaker identification accuracy: 100% on test samples
+- Speaker identification: High accuracy with Picovoice Eagle (state-of-the-art deep learning)
 - Transcription accuracy: High quality with Whisper medium model
 
 ### Model Comparison
@@ -338,8 +360,8 @@ For detailed setup instructions, see [SETUP_CRONJOB.md](SETUP_CRONJOB.md).
 
 ### Key Technical Decisions
 
-1. **MFCC for Speaker ID**: Chose Mel-Frequency Cepstral Coefficients over spectrograms for better speaker discrimination
-2. **Cosine Similarity**: Provides robust speaker matching with configurable thresholds
+1. **Picovoice Eagle**: Chose industry-leading on-device speaker recognition for accuracy and privacy
+2. **Deep Learning Recognition**: State-of-the-art speaker identification with voice profiles
 3. **Whisper Integration**: Balances accuracy and processing speed with model size options
 4. **Incremental Processing**: Tracks modification times to avoid reprocessing files
 5. **MLX Optimization**: Leverages Apple Silicon acceleration with CPU fallback
@@ -349,7 +371,7 @@ For detailed setup instructions, see [SETUP_CRONJOB.md](SETUP_CRONJOB.md).
 1. **ffmpeg Dependency**: Whisper requires ffmpeg for audio format support
 2. **Virtual Environment**: macOS externally-managed environment requires venv
 3. **File Duration Validation**: librosa integration for accurate duration checking
-4. **Feature Normalization**: StandardScaler ensures consistent speaker identification
+4. **Eagle Integration**: Picovoice Eagle for professional-grade speaker recognition
 5. **Path Handling**: Robust path expansion and validation across different systems
 
 ### Testing Results
@@ -362,8 +384,8 @@ For detailed setup instructions, see [SETUP_CRONJOB.md](SETUP_CRONJOB.md).
 **Results**:
 - ✅ File discovery and filtering working correctly
 - ✅ Audio duration validation accurate
-- ✅ Transcription quality excellent
-- ✅ Speaker identification 100% accurate
+- ✅ Transcription quality excellent with MLX Whisper
+- ✅ Speaker identification using Picovoice Eagle (state-of-the-art accuracy)
 - ✅ Directory structure created as specified
 - ✅ File naming conventions followed
 - ✅ Backup system functioning
@@ -385,9 +407,17 @@ pip install -r requirements.txt
 ```
 
 **Low Speaker Identification Accuracy**
-- Ensure speaker samples are high quality (30+ seconds)
-- Check `speaker_similarity_threshold` in config (try lowering to 0.7-0.8)
+- Ensure speaker samples are high quality (30+ seconds minimum)
+- Provide multiple samples per speaker for better enrollment
+- Check `speaker_similarity_threshold` in config (default: 0.5, adjust between 0.3-0.7)
 - Verify speaker sample files are properly named and placed
+- Ensure Picovoice access key is valid
+
+**Picovoice Eagle Issues**
+- Verify access key is correctly set in config.json
+- Check access key is active at [Picovoice Console](https://console.picovoice.ai/)
+- Ensure you have sufficient enrollment audio (30+ seconds per speaker)
+- Check enrollment feedback messages in logs for audio quality issues
 
 **Files Not Being Processed**
 - Check `min_duration_minutes` setting
@@ -433,7 +463,7 @@ logging.basicConfig(
 ### Planned Features
 
 1. **Web Interface**: Browser-based management and monitoring
-2. **Advanced Speaker Training**: Deep learning models for better identification
+2. **Speaker Profile Persistence**: Save Eagle profiles to disk to avoid re-enrollment
 3. **Multi-language Support**: Whisper language detection and transcription
 4. **Cloud Storage Integration**: Direct processing from cloud providers
 5. **Batch Processing UI**: Progress tracking and queue management
@@ -445,9 +475,9 @@ logging.basicConfig(
 
 1. **Parallel Processing**: Multi-threaded file processing
 2. **GPU Acceleration**: Full MLX integration for all components
-3. **Caching System**: Store computed features and transcriptions
+3. **Caching System**: Store computed Eagle profiles and transcriptions
 4. **Streaming Processing**: Handle large files without loading entirely
-5. **Incremental Training**: Update speaker models with new samples
+5. **Profile Persistence**: Cache speaker profiles to avoid re-enrollment on every run
 
 ## 📝 Logging and Monitoring
 

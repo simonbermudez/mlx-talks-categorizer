@@ -212,3 +212,5 @@ test/
 
 config.json.backup
 last_run.json
+
+config.json
