@@ -334,6 +334,7 @@ class SpeakerIdentifier:
         self.speakers_path = Path(config.get("speakers_path"))
         self.speaker_embeddings = {}  # Maps speaker name to embedding
         self.diarization_pipeline = None
+        self.embedding_model = None  # Separate embedding model for speaker identification
 
         # Get Pyannote configuration
         pyannote_config = config.get("pyannote", {})
@@ -383,6 +384,35 @@ class SpeakerIdentifier:
             else:
                 logging.info("Pyannote pipeline loaded successfully (using CPU)")
 
+            # Load a separate embedding model for robust speaker identification
+            from pyannote.audio import Inference
+
+            # Try multiple embedding models in order of preference
+            embedding_models = [
+                "pyannote/embedding",  # Preferred but gated
+                "pyannote/wespeaker-voxceleb-resnet34-LM",  # Open alternative
+            ]
+
+            for model_id in embedding_models:
+                try:
+                    logging.info(f"Attempting to load embedding model: {model_id}")
+                    self.embedding_model = Inference(model_id, use_auth_token=self.hf_token)
+
+                    # Move embedding model to same device as diarization
+                    if torch.backends.mps.is_available():
+                        self.embedding_model.to(torch.device("mps"))
+                    elif torch.cuda.is_available():
+                        self.embedding_model.to(torch.device("cuda"))
+
+                    logging.info(f"Speaker embedding model loaded successfully: {model_id}")
+                    break  # Success, exit loop
+                except Exception as e:
+                    logging.warning(f"Failed to load {model_id}: {e}")
+                    if model_id == embedding_models[-1]:
+                        # Last model failed, raise error
+                        raise Exception(f"Could not load any embedding model. Please accept terms at https://hf.co/pyannote/embedding or https://hf.co/pyannote/wespeaker-voxceleb-resnet34-LM")
+                    continue
+
             # Load speaker samples from all supported formats
             supported_formats = self.config.get("supported_formats", [".mp3", ".wav", ".mp4"])
             speaker_files = {}
@@ -403,89 +433,77 @@ class SpeakerIdentifier:
             for speaker_name, files in speaker_files.items():
                 logging.info(f"Creating embedding for speaker: {speaker_name} ({len(files)} sample(s))")
 
-                # For now, we'll use the first file to create an embedding
-                # In production, you might want to average embeddings from multiple files
-                sample_file = files[0]
+                # Process all files for this speaker and average embeddings
+                all_embeddings = []
 
-                try:
-                    # Extract audio from MP4 if needed
-                    audio_file = sample_file
-                    temp_file = None
-                    if sample_file.lower().endswith('.mp4'):
-                        # Extract audio to temporary WAV file
-                        import tempfile
-                        temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-                        temp_file.close()
+                for sample_file in files[:3]:  # Use up to 3 files per speaker
+                    try:
+                        # Extract audio from MP4 if needed
+                        audio_file = sample_file
+                        temp_file = None
+                        if sample_file.lower().endswith('.mp4'):
+                            # Extract audio to temporary WAV file
+                            import tempfile
+                            temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                            temp_file.close()
 
-                        result = subprocess.run([
-                            'ffmpeg', '-i', sample_file, '-vn', '-acodec', 'pcm_s16le',
-                            '-ar', '16000', '-ac', '1', '-y', temp_file.name
-                        ], capture_output=True, text=True, timeout=60)
+                            result = subprocess.run([
+                                'ffmpeg', '-i', sample_file, '-vn', '-acodec', 'pcm_s16le',
+                                '-ar', '16000', '-ac', '1', '-y', temp_file.name
+                            ], capture_output=True, text=True, timeout=60)
 
-                        if result.returncode == 0:
-                            audio_file = temp_file.name
-                            logging.debug(f"Extracted audio from {sample_file} to {audio_file}")
-                        else:
-                            logging.error(f"Failed to extract audio from {sample_file}: {result.stderr}")
-                            continue
+                            if result.returncode == 0:
+                                audio_file = temp_file.name
+                                logging.debug(f"Extracted audio from {sample_file} to {audio_file}")
+                            else:
+                                logging.error(f"Failed to extract audio from {sample_file}: {result.stderr}")
+                                continue
 
-                    # Run diarization to extract speaker segments
-                    diarization = self.diarization_pipeline(audio_file)
+                        # Extract embedding directly from the entire audio file
+                        # The Inference model handles variable-length audio automatically
+                        import numpy as np
+                        embedding = self.embedding_model({"audio": audio_file})
 
-                    # Extract embedding from the dominant speaker in the sample
-                    speaker_durations = {}
-                    for turn, _, speaker in diarization.itertracks(yield_label=True):
-                        duration = turn.end - turn.start
-                        speaker_durations[speaker] = speaker_durations.get(speaker, 0) + duration
+                        # Convert to numpy array if needed
+                        if hasattr(embedding, 'data'):
+                            embedding = embedding.data
+                        if torch.is_tensor(embedding):
+                            embedding = embedding.cpu().numpy()
 
-                    if speaker_durations:
-                        # Get the dominant speaker from the sample
-                        dominant_speaker = max(speaker_durations, key=speaker_durations.get)
+                        # Handle different embedding shapes
+                        if len(embedding.shape) > 1:
+                            # If multiple embeddings (e.g., sliding window), average them
+                            embedding = np.mean(embedding, axis=0)
 
-                        # Extract embedding for the dominant speaker using pipeline's embedding model
-                        # Get all segments for the dominant speaker
-                        speaker_segments = [turn for turn, _, spk in diarization.itertracks(yield_label=True) if spk == dominant_speaker]
+                        all_embeddings.append(embedding.flatten())
+                        logging.debug(f"Extracted embedding from {sample_file} (shape: {embedding.shape})")
 
-                        if speaker_segments:
-                            # Extract embeddings for all segments and average them
-                            embeddings = []
-                            import numpy as np
+                        # Clean up temp file if created
+                        if temp_file:
+                            import os
+                            try:
+                                os.unlink(temp_file.name)
+                            except:
+                                pass
 
-                            for segment in speaker_segments[:5]:  # Use up to 5 segments
-                                # Use the pipeline's embedding model directly
-                                emb = self.diarization_pipeline.embedding.crop({"audio": audio_file, "duration": None}, segment)
-                                embeddings.append(emb)
-
-                            # Average embeddings (stack and mean)
-                            avg_embedding = np.mean(np.vstack(embeddings), axis=0)
-
-                            # Store the averaged embedding
-                            self.speaker_embeddings[speaker_name] = avg_embedding
-                            logging.info(f"Successfully enrolled speaker: {speaker_name} (embedding shape: {avg_embedding.shape})")
-                        else:
-                            logging.warning(f"No segments found for speaker {speaker_name}")
-                            continue
-                    else:
-                        logging.warning(f"No speakers detected in sample for {speaker_name}")
+                    except Exception as e:
+                        logging.warning(f"Failed to extract embedding from {sample_file}: {e}")
+                        # Clean up temp file if it exists
+                        if 'temp_file' in locals() and temp_file:
+                            try:
+                                import os
+                                os.unlink(temp_file.name)
+                            except:
+                                pass
                         continue
 
-                    # Clean up temp file if created
-                    if temp_file:
-                        import os
-                        try:
-                            os.unlink(temp_file.name)
-                        except:
-                            pass
-
-                except Exception as e:
-                    logging.error(f"Error enrolling speaker {speaker_name}: {e}")
-                    # Clean up temp file if it exists
-                    if 'temp_file' in locals() and temp_file:
-                        try:
-                            os.unlink(temp_file.name)
-                        except:
-                            pass
-                    continue
+                if all_embeddings:
+                    # Average all embeddings for this speaker
+                    avg_embedding = np.mean(all_embeddings, axis=0)
+                    self.speaker_embeddings[speaker_name] = avg_embedding
+                    logging.info(f"Successfully enrolled speaker: {speaker_name} (embedding shape: {avg_embedding.shape})")
+                else:
+                    logging.warning(f"No valid embeddings extracted for {speaker_name}")
 
             if self.speaker_embeddings:
                 logging.info(f"Enrolled {len(self.speaker_embeddings)} speaker(s)")
@@ -495,12 +513,14 @@ class SpeakerIdentifier:
         except Exception as e:
             logging.error(f"Error loading Pyannote pipeline: {e}")
             logging.error("Make sure you've accepted the model terms at: https://huggingface.co/pyannote/speaker-diarization-3.1")
+            logging.error("and https://huggingface.co/pyannote/embedding")
             self.diarization_pipeline = None
+            self.embedding_model = None
 
     def identify_speaker(self, audio_file: str) -> str:
-        """Identify speaker from audio file using Pyannote diarization."""
-        if not self.diarization_pipeline:
-            logging.warning("Diarization pipeline not initialized")
+        """Identify speaker from audio file using Pyannote embedding model."""
+        if not hasattr(self, 'embedding_model') or not self.embedding_model:
+            logging.warning("Embedding model not initialized")
             return "Miscellaneous Speakers"
 
         if not self.speaker_embeddings:
@@ -508,7 +528,7 @@ class SpeakerIdentifier:
             return "Miscellaneous Speakers"
 
         try:
-            logging.debug(f"Running speaker diarization on: {audio_file}")
+            logging.debug(f"Identifying speaker in: {audio_file}")
 
             # Extract audio from MP4 if needed
             processing_file = audio_file
@@ -530,50 +550,26 @@ class SpeakerIdentifier:
                     logging.error(f"Failed to extract audio from {audio_file}: {result.stderr}")
                     return "Miscellaneous Speakers"
 
-            # Run diarization on the audio file
-            diarization = self.diarization_pipeline(
-                processing_file,
-                min_speakers=self.min_speakers,
-                max_speakers=self.max_speakers
-            )
-
-            # Get the dominant speaker (speaker with most speaking time)
-            speaker_durations = {}
-            for turn, _, speaker in diarization.itertracks(yield_label=True):
-                duration = turn.end - turn.start
-                speaker_durations[speaker] = speaker_durations.get(speaker, 0) + duration
-
-            if not speaker_durations:
-                logging.info("No speakers detected in audio")
-                return "Miscellaneous Speakers"
-
-            # Find speaker with most speaking time
-            dominant_speaker_id = max(speaker_durations, key=speaker_durations.get)
-            total_duration = sum(speaker_durations.values())
-            dominant_duration = speaker_durations[dominant_speaker_id]
-            dominance_ratio = dominant_duration / total_duration if total_duration > 0 else 0
-
-            logging.info(f"Detected {len(speaker_durations)} speaker(s)")
-            logging.info(f"Dominant speaker: {dominant_speaker_id} ({dominance_ratio*100:.1f}% of audio)")
-
-            # Extract embedding for the dominant speaker using pipeline's embedding model
+            # Extract embedding directly from the audio file
+            # The Inference model handles variable-length audio automatically
             import numpy as np
+            import torch
 
-            # Get segments for the dominant speaker
-            dominant_segments = [turn for turn, _, spk in diarization.itertracks(yield_label=True) if spk == dominant_speaker_id]
+            embedding = self.embedding_model({"audio": processing_file})
 
-            if not dominant_segments:
-                logging.warning("No segments found for dominant speaker")
-                return "Miscellaneous Speakers"
+            # Convert to numpy array if needed
+            if hasattr(embedding, 'data'):
+                embedding = embedding.data
+            if torch.is_tensor(embedding):
+                embedding = embedding.cpu().numpy()
 
-            # Extract embeddings and average
-            unknown_embeddings = []
-            for segment in dominant_segments[:5]:  # Use up to 5 segments
-                # Use the pipeline's embedding model directly
-                emb = self.diarization_pipeline.embedding.crop({"audio": processing_file, "duration": None}, segment)
-                unknown_embeddings.append(emb)
+            # Handle different embedding shapes
+            if len(embedding.shape) > 1:
+                # If multiple embeddings (e.g., sliding window), average them
+                unknown_embedding = np.mean(embedding, axis=0).flatten()
+            else:
+                unknown_embedding = embedding.flatten()
 
-            unknown_embedding = np.mean(np.vstack(unknown_embeddings), axis=0)
             logging.debug(f"Extracted embedding for unknown speaker (shape: {unknown_embedding.shape})")
 
             # Compare to enrolled speakers using cosine similarity
