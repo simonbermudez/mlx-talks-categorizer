@@ -442,33 +442,22 @@ class SpeakerIdentifier:
                         # Get the dominant speaker from the sample
                         dominant_speaker = max(speaker_durations, key=speaker_durations.get)
 
-                        # Extract embedding for this speaker
-                        from pyannote.audio import Inference
-                        # Access the embedding model from the pipeline
-                        embedding_model = Inference(
-                            self.diarization_pipeline._embedding,
-                            window="whole"
-                        )
-                        # Move to same device as pipeline
-                        import torch
-                        if torch.backends.mps.is_available():
-                            embedding_model.to(torch.device("mps"))
-                        elif torch.cuda.is_available():
-                            embedding_model.to(torch.device("cuda"))
-
+                        # Extract embedding for the dominant speaker using pipeline's embedding model
                         # Get all segments for the dominant speaker
                         speaker_segments = [turn for turn, _, spk in diarization.itertracks(yield_label=True) if spk == dominant_speaker]
 
                         if speaker_segments:
                             # Extract embeddings for all segments and average them
                             embeddings = []
-                            for segment in speaker_segments[:5]:  # Use up to 5 segments
-                                emb = embedding_model.crop(audio_file, segment)
-                                embeddings.append(emb.numpy())
-
-                            # Average embeddings
                             import numpy as np
-                            avg_embedding = np.mean(embeddings, axis=0)
+
+                            for segment in speaker_segments[:5]:  # Use up to 5 segments
+                                # Use the pipeline's embedding model directly
+                                emb = self.diarization_pipeline.embedding.crop({"audio": audio_file, "duration": None}, segment)
+                                embeddings.append(emb)
+
+                            # Average embeddings (stack and mean)
+                            avg_embedding = np.mean(np.vstack(embeddings), axis=0)
 
                             # Store the averaged embedding
                             self.speaker_embeddings[speaker_name] = avg_embedding
@@ -567,21 +556,8 @@ class SpeakerIdentifier:
             logging.info(f"Detected {len(speaker_durations)} speaker(s)")
             logging.info(f"Dominant speaker: {dominant_speaker_id} ({dominance_ratio*100:.1f}% of audio)")
 
-            # Extract embedding for the dominant speaker
-            from pyannote.audio import Inference
+            # Extract embedding for the dominant speaker using pipeline's embedding model
             import numpy as np
-
-            # Access the embedding model from the pipeline
-            embedding_model = Inference(
-                self.diarization_pipeline._embedding,
-                window="whole"
-            )
-            # Move to same device as pipeline
-            import torch
-            if torch.backends.mps.is_available():
-                embedding_model.to(torch.device("mps"))
-            elif torch.cuda.is_available():
-                embedding_model.to(torch.device("cuda"))
 
             # Get segments for the dominant speaker
             dominant_segments = [turn for turn, _, spk in diarization.itertracks(yield_label=True) if spk == dominant_speaker_id]
@@ -593,10 +569,11 @@ class SpeakerIdentifier:
             # Extract embeddings and average
             unknown_embeddings = []
             for segment in dominant_segments[:5]:  # Use up to 5 segments
-                emb = embedding_model.crop(processing_file, segment)
-                unknown_embeddings.append(emb.numpy())
+                # Use the pipeline's embedding model directly
+                emb = self.diarization_pipeline.embedding.crop({"audio": processing_file, "duration": None}, segment)
+                unknown_embeddings.append(emb)
 
-            unknown_embedding = np.mean(unknown_embeddings, axis=0)
+            unknown_embedding = np.mean(np.vstack(unknown_embeddings), axis=0)
             logging.debug(f"Extracted embedding for unknown speaker (shape: {unknown_embedding.shape})")
 
             # Compare to enrolled speakers using cosine similarity
