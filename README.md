@@ -17,21 +17,20 @@ The MLX Talks Categorizer is designed to solve the challenge of managing large v
 
 ### Core Components
 
-1. **AudioProcessor**: Handles file discovery, validation, and audio feature extraction
-2. **Transcriber**: Uses Whisper for speech-to-text conversion and description generation
-3. **SpeakerIdentifier**: MFCC-based voice recognition with cosine similarity matching
+1. **AudioProcessor**: Handles file discovery, validation, and duration checking
+2. **Transcriber**: Uses Whisper for speech-to-text conversion and AI-powered description generation
+3. **SpeakerIdentifier**: Uses Pyannote.audio for state-of-the-art speaker diarization
 4. **FileOrganizer**: Manages directory structure and file placement
 5. **AudioFileManager**: Main orchestrator coordinating all components
 
 ### Technology Stack
 
 - **Python 3.13+** - Core runtime
-- **MLX** - Apple Silicon optimization framework
 - **MLX Whisper** - Optimized speech-to-text transcription for Apple Silicon
 - **OpenAI Whisper** - Fallback speech-to-text transcription
 - **OpenAI ChatGPT** - AI-powered intelligent title generation
-- **librosa** - Audio analysis and feature extraction
-- **scikit-learn** - Machine learning algorithms for speaker identification
+- **Pyannote.audio** - State-of-the-art speaker diarization (FREE, on-device)
+- **librosa** - Audio analysis and duration checking
 - **ffmpeg** - Audio format support and processing
 
 ## 📁 Directory Structure
@@ -87,6 +86,8 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+**Note:** This includes Pyannote.audio and PyTorch. First install may take a few minutes.
+
 ### Step 3a: Install MLX Whisper (Recommended for Apple Silicon)
 
 For optimal performance on Apple Silicon, install MLX Whisper:
@@ -103,7 +104,23 @@ This provides 30-40% faster transcription compared to regular Whisper on Apple S
 brew install ffmpeg
 ```
 
-### Step 5: Initial Setup
+### Step 4: Get Your Hugging Face Token
+
+Pyannote.audio requires a free Hugging Face token:
+
+1. Sign up at [huggingface.co](https://huggingface.co/)
+2. Go to [Settings → Tokens](https://huggingface.co/settings/tokens)
+3. Create a new **Read** token
+4. Copy the token
+
+### Step 5: Accept Model Terms
+
+Accept the Pyannote model terms (one-time):
+
+1. Visit [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) and accept terms
+2. Visit [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0) and accept terms
+
+### Step 6: Initial Setup
 
 ```bash
 python main.py --setup
@@ -113,6 +130,23 @@ This creates:
 - `config.json` - Configuration file
 - Directory structure for organized talks
 - Sample configuration with default paths
+
+### Step 7: Configure Your Tokens
+
+Edit `config.json` and add your tokens:
+
+```json
+{
+  "title_generation": {
+    "openai_api_key": "sk-YOUR_OPENAI_KEY"
+  },
+  "pyannote": {
+    "hf_token": "hf_YOUR_HUGGING_FACE_TOKEN"
+  }
+}
+```
+
+**See [PYANNOTE_SETUP.md](PYANNOTE_SETUP.md) for detailed setup instructions.**
 
 ## ⚙️ Configuration
 
@@ -197,27 +231,41 @@ OpenAI ChatGPT API is usage-based:
 - Processing uses only the first 1000 characters of each transcript
 - See [OpenAI Pricing](https://openai.com/pricing) for current rates
 
-## 🎤 Speaker Identification Setup
+## 🎤 Speaker Identification with Pyannote.audio
+
+### Why Pyannote?
+
+✅ **FREE** - No monthly costs (vs $39+ for RingCentral)
+✅ **Accurate** - State-of-the-art ~90% accuracy
+✅ **Private** - All processing on your device
+✅ **Unlimited** - No usage caps or quotas
+
+See [SPEAKER_API_COMPARISON.md](SPEAKER_API_COMPARISON.md) for detailed cost analysis.
 
 ### Adding Speaker Samples
 
 1. Record or obtain clean audio samples of each speaker (30+ seconds recommended)
 2. Save files named with the speaker's name: `John_Doe.mp3`, `Jane_Smith.wav`, or `Bob_Jones.mp4`
 3. Place in the `organized_talks/speakers/` directory
+4. For better accuracy, add multiple samples: `John_Doe_1.mp3`, `John_Doe_2.mp3`
 
 ### Speaker Sample Requirements
 
-- **Duration**: 30+ seconds for better accuracy
+- **Duration**: 30+ seconds minimum (60+ seconds recommended)
 - **Quality**: Clear speech, minimal background noise
 - **Format**: MP3, WAV, or MP4 (video files will extract audio automatically)
 - **Content**: Natural speech patterns representative of the speaker
+- **Multiple samples**: 2-3 samples per speaker improves accuracy
 
-### How Speaker Identification Works
+### How Pyannote Speaker Identification Works
 
-1. **Feature Extraction**: Uses MFCC (Mel-Frequency Cepstral Coefficients) to extract voice characteristics
-2. **Normalization**: Applies StandardScaler for consistent feature scaling
-3. **Similarity Matching**: Calculates cosine similarity between unknown and known speaker features
-4. **Threshold Filtering**: Only matches above the configured similarity threshold
+1. **Model Loading**: Loads pre-trained deep learning models from Hugging Face
+2. **Speaker Diarization**: Segments audio and identifies distinct speakers
+3. **Embedding Creation**: Creates unique voice embeddings for enrolled speakers
+4. **Similarity Matching**: Compares detected speakers to enrolled embeddings
+5. **Dominant Speaker**: Returns speaker with most speaking time above threshold
+
+Pyannote uses state-of-the-art deep learning (similar to ChatGPT for voices) for superior accuracy.
 
 ## 📋 Usage
 
