@@ -45,6 +45,7 @@ pathlib2==2.3.7.post1
 pillow==11.3.0
 platformdirs==4.3.8
 pooch==1.8.2
+psutil==6.1.0
 proglog==0.1.12
 pyannote.audio==3.4.0
 pyannote.core==5.0.0

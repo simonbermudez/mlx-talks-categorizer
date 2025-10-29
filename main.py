@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import argparse
+import gc
+import psutil
 
 # Audio processing libraries
 import librosa
@@ -48,6 +50,17 @@ try:
 except ImportError:
     PYANNOTE_AVAILABLE = False
     print("Warning: pyannote.audio not available. Install with: pip install pyannote.audio")
+
+
+def log_memory_usage(context: str = ""):
+    """Log current memory usage for monitoring (memory optimization helper)."""
+    try:
+        process = psutil.Process()
+        mem_info = process.memory_info()
+        mem_mb = mem_info.rss / 1024 / 1024
+        logging.info(f"Memory usage {context}: {mem_mb:.1f} MB")
+    except Exception as e:
+        logging.debug(f"Could not log memory usage: {e}")
 
 
 class Config:
@@ -122,28 +135,24 @@ class AudioProcessor:
         self.supported_formats = config.get("supported_formats")
     
     def get_audio_duration(self, file_path: str) -> float:
-        """Get duration of audio file in seconds."""
+        """Get duration of audio file in seconds (MEMORY OPTIMIZED - no file loading)."""
         try:
-            # For MP4 files, try ffprobe first as it handles video containers better
-            if file_path.lower().endswith('.mp4'):
-                try:
-                    result = subprocess.run([
-                        'ffprobe', '-v', 'quiet', '-print_format', 'json', 
-                        '-show_format', file_path
-                    ], capture_output=True, text=True, timeout=30)
-                    
-                    if result.returncode == 0:
-                        import json
-                        probe_data = json.loads(result.stdout)
-                        duration = float(probe_data['format']['duration'])
-                        return duration
-                except Exception:
-                    # Fallback to librosa
-                    pass
-            
-            # Use librosa for audio files or as fallback
-            duration = librosa.get_duration(path=file_path)
-            return duration
+            # MEMORY OPTIMIZATION: Always use ffprobe to avoid loading entire file
+            # This reads metadata only, not the actual audio data
+            result = subprocess.run([
+                'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                '-show_format', file_path
+            ], capture_output=True, text=True, timeout=30)
+
+            if result.returncode == 0:
+                probe_data = json.loads(result.stdout)
+                duration = float(probe_data['format']['duration'])
+                return duration
+            else:
+                # Fallback to librosa only if ffprobe fails
+                logging.debug(f"ffprobe failed, using librosa for {file_path}")
+                duration = librosa.get_duration(path=file_path)
+                return duration
         except Exception as e:
             logging.error(f"Error getting duration for {file_path}: {e}")
             return 0
@@ -152,33 +161,66 @@ class AudioProcessor:
         """Check if file is a valid audio file with minimum duration."""
         if not os.path.exists(file_path):
             return False
-        
+
         # Check file extension
         ext = Path(file_path).suffix.lower()
         if ext not in self.supported_formats:
             return False
-        
+
         # Check duration
         duration = self.get_audio_duration(file_path)
         return duration >= self.min_duration
+
+    def extract_audio_chunk(self, file_path: str, start_sec: float, duration_sec: float, output_path: str) -> bool:
+        """
+        Extract a chunk of audio without loading the entire file (MEMORY OPTIMIZED).
+
+        Args:
+            file_path: Source audio file
+            start_sec: Start time in seconds
+            duration_sec: Duration to extract in seconds
+            output_path: Output file path for the chunk
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Use ffmpeg to extract chunk without loading full file into memory
+            result = subprocess.run([
+                'ffmpeg', '-ss', str(start_sec), '-t', str(duration_sec),
+                '-i', file_path, '-vn', '-acodec', 'pcm_s16le',
+                '-ar', '16000', '-ac', '1', '-y', output_path
+            ], capture_output=True, text=True, timeout=120)
+
+            if result.returncode == 0:
+                logging.debug(f"Extracted {duration_sec}s chunk from {file_path} starting at {start_sec}s")
+                return True
+            else:
+                logging.error(f"Failed to extract chunk: {result.stderr}")
+                return False
+        except Exception as e:
+            logging.error(f"Error extracting audio chunk: {e}")
+            return False
 
 
 class Transcriber:
     """Handles audio transcription using Whisper and title generation using OpenAI ChatGPT."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, audio_processor: AudioProcessor = None):
         self.config = config
+        self.audio_processor = audio_processor
         self.model = None
+        self.model_name = config.get("whisper_model", "tiny")
         self.title_config = config.get("title_generation", {})
         self.use_mlx = False
         self.hf_token = config.get("pyannote", {}).get("hf_token", "")
+        self.memory_opts = config.get("memory_optimizations", {})
 
         # Try MLX Whisper first for Apple Silicon optimization
         if MLX_WHISPER_AVAILABLE:
             try:
-                model_name = config.get("whisper_model", "medium")
                 # MLX Whisper uses different model naming convention
-                mlx_model_name = self._convert_to_mlx_model_name(model_name)
+                mlx_model_name = self._convert_to_mlx_model_name(self.model_name)
                 # For MLX Whisper, we store the model name rather than loading it
                 self.model = mlx_model_name
                 self.use_mlx = True
@@ -187,14 +229,10 @@ class Transcriber:
                 logging.error(f"Error configuring MLX Whisper model: {e}")
                 self.model = None
 
-        # Fallback to regular Whisper if MLX Whisper failed or unavailable
+        # MEMORY OPTIMIZATION: Don't load regular Whisper at init - use lazy loading
+        # If MLX not available, model will be None and loaded on first use
         if self.model is None and WHISPER_AVAILABLE:
-            try:
-                model_name = config.get("whisper_model", "medium")
-                self.model = whisper.load_model(model_name)
-                logging.info(f"Loaded regular Whisper model: {model_name}")
-            except Exception as e:
-                logging.error(f"Error loading regular Whisper model: {e}")
+            logging.info(f"Will lazy-load Whisper model '{self.model_name}' when needed")
 
     def _convert_to_mlx_model_name(self, model_name: str) -> str:
         """Convert regular Whisper model name to MLX Whisper format."""
@@ -212,11 +250,15 @@ class Transcriber:
         return mlx_model_mapping.get(model_name, f"mlx-community/whisper-{model_name}-mlx")
     
     def transcribe_audio(self, file_path: str) -> Optional[str]:
-        """Transcribe audio file to text."""
-        if not self.model:
-            logging.error("Whisper model not available")
-            return None
+        """Transcribe audio file to text (with optional chunking for memory optimization)."""
+        # MEMORY OPTIMIZATION: Check if chunked transcription is enabled
+        if self.memory_opts.get("enable_chunked_transcription", False) and self.audio_processor:
+            return self._transcribe_audio_chunked(file_path)
+        else:
+            return self._transcribe_audio_full(file_path)
 
+    def _transcribe_audio_full(self, file_path: str) -> Optional[str]:
+        """Transcribe entire audio file (original method)."""
         try:
             if self.use_mlx:
                 # MLX Whisper transcription with HF token for model download
@@ -227,11 +269,83 @@ class Transcriber:
                 result = mlx_whisper.transcribe(file_path, path_or_hf_repo=self.model)
                 return result["text"].strip()
             else:
+                # MEMORY OPTIMIZATION: Lazy load regular Whisper model
+                if self.model is None:
+                    if not WHISPER_AVAILABLE:
+                        logging.error("Whisper not available")
+                        return None
+                    logging.info(f"Loading Whisper model: {self.model_name}")
+                    self.model = whisper.load_model(self.model_name)
+                    logging.info(f"Whisper model loaded successfully")
+
                 # Regular Whisper transcription
                 result = self.model.transcribe(file_path)
                 return result["text"].strip()
         except Exception as e:
             logging.error(f"Error transcribing {file_path}: {e}")
+            return None
+
+    def _transcribe_audio_chunked(self, file_path: str) -> Optional[str]:
+        """
+        Transcribe audio in chunks to minimize memory usage (MEMORY OPTIMIZED).
+        Perfect for 30-60 minute files - processes 5-minute chunks at a time.
+        """
+        import tempfile
+
+        try:
+            # Get total duration
+            duration = self.audio_processor.get_audio_duration(file_path)
+            if duration <= 0:
+                logging.error(f"Could not get duration for {file_path}")
+                return None
+
+            chunk_size = self.memory_opts.get("transcription_chunk_size_seconds", 300)  # 5 minutes default
+            logging.info(f"Transcribing {duration:.1f}s audio in {chunk_size}s chunks (memory optimized)")
+
+            all_transcripts = []
+            num_chunks = int(np.ceil(duration / chunk_size))
+
+            for i in range(num_chunks):
+                start_time = i * chunk_size
+                chunk_duration = min(chunk_size, duration - start_time)
+
+                logging.debug(f"Processing chunk {i+1}/{num_chunks}: {start_time:.1f}s - {start_time + chunk_duration:.1f}s")
+
+                # Create temporary file for chunk
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_chunk:
+                    temp_chunk_path = temp_chunk.name
+
+                try:
+                    # Extract chunk using ffmpeg (no memory overhead)
+                    if not self.audio_processor.extract_audio_chunk(file_path, start_time, chunk_duration, temp_chunk_path):
+                        logging.error(f"Failed to extract chunk {i+1}")
+                        continue
+
+                    # Transcribe the small chunk
+                    chunk_transcript = self._transcribe_audio_full(temp_chunk_path)
+                    if chunk_transcript:
+                        all_transcripts.append(chunk_transcript)
+
+                    # Clean up chunk file immediately
+                    os.unlink(temp_chunk_path)
+
+                    # Force garbage collection after each chunk
+                    gc.collect()
+
+                except Exception as e:
+                    logging.error(f"Error processing chunk {i+1}: {e}")
+                    # Clean up on error
+                    if os.path.exists(temp_chunk_path):
+                        os.unlink(temp_chunk_path)
+                    continue
+
+            # Combine all transcripts
+            full_transcript = " ".join(all_transcripts)
+            logging.info(f"Chunked transcription complete: {len(full_transcript)} characters")
+            return full_transcript.strip()
+
+        except Exception as e:
+            logging.error(f"Error in chunked transcription: {e}")
             return None
     
     def generate_openai_title(self, transcript: str) -> Optional[str]:
@@ -335,6 +449,7 @@ class SpeakerIdentifier:
         self.speaker_embeddings = {}  # Maps speaker name to embedding
         self.diarization_pipeline = None
         self.embedding_model = None  # Separate embedding model for speaker identification
+        self._models_loaded = False  # Track if models are loaded
 
         # Get Pyannote configuration
         pyannote_config = config.get("pyannote", {})
@@ -352,7 +467,55 @@ class SpeakerIdentifier:
             logging.error("Add it to config.json under pyannote.hf_token")
             return
 
-        self.load_speaker_samples()
+        # MEMORY OPTIMIZATION: Don't load models at init, use lazy loading
+        # self.load_speaker_samples()
+
+    def _ensure_models_loaded(self):
+        """Lazy load models only when needed (memory optimization)."""
+        if not self._models_loaded:
+            logging.info("Lazy loading Pyannote models...")
+            self.load_speaker_samples()
+            self._models_loaded = True
+
+    def unload_models(self):
+        """Unload models to free memory (aggressive memory optimization)."""
+        import gc
+        import torch
+
+        # Move models to CPU before deleting to release GPU memory
+        try:
+            if self.diarization_pipeline is not None:
+                if hasattr(self.diarization_pipeline, 'to'):
+                    self.diarization_pipeline.to(torch.device("cpu"))
+                del self.diarization_pipeline
+                self.diarization_pipeline = None
+                logging.debug("Unloaded diarization pipeline")
+
+            if self.embedding_model is not None:
+                if hasattr(self.embedding_model, 'to'):
+                    self.embedding_model.to(torch.device("cpu"))
+                del self.embedding_model
+                self.embedding_model = None
+                logging.debug("Unloaded embedding model")
+        except Exception as e:
+            logging.debug(f"Error moving models to CPU: {e}")
+
+        self._models_loaded = False
+
+        # Multiple rounds of garbage collection for better cleanup
+        for _ in range(3):
+            gc.collect()
+
+        # Clear GPU/MPS cache
+        try:
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+                logging.debug("Cleared MPS cache")
+            elif torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logging.debug("Cleared CUDA cache")
+        except Exception as e:
+            logging.debug(f"Error clearing GPU cache: {e}")
 
     def load_speaker_samples(self):
         """Load speaker samples and create embeddings using Pyannote."""
@@ -500,7 +663,8 @@ class SpeakerIdentifier:
                 if all_embeddings:
                     # Average all embeddings for this speaker
                     avg_embedding = np.mean(all_embeddings, axis=0)
-                    self.speaker_embeddings[speaker_name] = avg_embedding
+                    # MEMORY OPTIMIZATION: Store embeddings as float16 to reduce memory usage
+                    self.speaker_embeddings[speaker_name] = avg_embedding.astype(np.float16)
                     logging.info(f"Successfully enrolled speaker: {speaker_name} (embedding shape: {avg_embedding.shape})")
                 else:
                     logging.warning(f"No valid embeddings extracted for {speaker_name}")
@@ -518,7 +682,10 @@ class SpeakerIdentifier:
             self.embedding_model = None
 
     def identify_speaker(self, audio_file: str) -> str:
-        """Identify speaker from audio file using Pyannote embedding model."""
+        """Identify speaker from audio file using Pyannote embedding model (MEMORY OPTIMIZED)."""
+        # MEMORY OPTIMIZATION: Lazy load models only when needed
+        self._ensure_models_loaded()
+
         if not hasattr(self, 'embedding_model') or not self.embedding_model:
             logging.warning("Embedding model not initialized")
             return "Miscellaneous Speakers"
@@ -530,27 +697,48 @@ class SpeakerIdentifier:
         try:
             logging.debug(f"Identifying speaker in: {audio_file}")
 
-            # Extract audio from MP4 if needed
-            processing_file = audio_file
-            temp_file = None
-            if audio_file.lower().endswith('.mp4'):
-                import tempfile
-                temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-                temp_file.close()
+            # MEMORY OPTIMIZATION: Extract only a small sample for speaker ID
+            # Most audio files are single speaker, so we only need ~30 seconds
+            import tempfile
+            memory_opts = self.config.get("memory_optimizations", {})
+            sample_duration = memory_opts.get("speaker_identification_sample_seconds", 30)
+            sample_offset = memory_opts.get("speaker_identification_sample_offset", 60)
 
-                result = subprocess.run([
-                    'ffmpeg', '-i', audio_file, '-vn', '-acodec', 'pcm_s16le',
-                    '-ar', '16000', '-ac', '1', '-y', temp_file.name
-                ], capture_output=True, text=True, timeout=60)
+            # Check file duration and adjust offset for short files
+            file_duration = self.audio_processor.get_audio_duration(audio_file)
+            required_duration = sample_offset + sample_duration
 
-                if result.returncode == 0:
-                    processing_file = temp_file.name
-                    logging.debug(f"Extracted audio from {audio_file} for identification")
+            if file_duration < required_duration:
+                # For short files, extract from the beginning or middle
+                if file_duration < sample_duration:
+                    # Very short file - use entire file
+                    sample_offset = 0
+                    sample_duration = file_duration
+                    logging.info(f"Short file ({file_duration:.1f}s) - using entire file for speaker ID")
                 else:
-                    logging.error(f"Failed to extract audio from {audio_file}: {result.stderr}")
-                    return "Miscellaneous Speakers"
+                    # Adjust offset to extract from middle
+                    sample_offset = max(0, (file_duration - sample_duration) / 2)
+                    logging.info(f"Short file ({file_duration:.1f}s) - extracting {sample_duration}s from {sample_offset:.1f}s offset")
+            else:
+                logging.info(f"Extracting {sample_duration}s sample from {sample_offset}s offset for speaker ID (memory optimized)")
 
-            # Extract embedding directly from the audio file
+            temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+            temp_file.close()
+            processing_file = temp_file.name
+
+            # Extract a small sample from the audio
+            result = subprocess.run([
+                'ffmpeg', '-ss', str(sample_offset), '-t', str(sample_duration),
+                '-i', audio_file, '-vn', '-acodec', 'pcm_s16le',
+                '-ar', '16000', '-ac', '1', '-y', processing_file
+            ], capture_output=True, text=True, timeout=120)
+
+            if result.returncode != 0:
+                logging.error(f"Failed to extract audio sample: {result.stderr}")
+                os.unlink(processing_file)
+                return "Miscellaneous Speakers"
+
+            # Extract embedding from the small sample
             # The Inference model handles variable-length audio automatically
             import numpy as np
             import torch
@@ -579,10 +767,12 @@ class SpeakerIdentifier:
             best_similarity = -1
 
             for speaker_name, enrolled_embedding in self.speaker_embeddings.items():
+                # MEMORY OPTIMIZATION: Convert float16 back to float32 for comparison
+                enrolled_emb = enrolled_embedding.astype(np.float32) if enrolled_embedding.dtype == np.float16 else enrolled_embedding
                 # Calculate cosine similarity
                 similarity = cosine_similarity(
                     unknown_embedding.reshape(1, -1),
-                    enrolled_embedding.reshape(1, -1)
+                    enrolled_emb.reshape(1, -1)
                 )[0][0]
 
                 logging.debug(f"Similarity with {speaker_name}: {similarity:.3f}")
@@ -594,13 +784,11 @@ class SpeakerIdentifier:
             # Check if best match is above threshold
             threshold = self.config.get("speaker_similarity_threshold", 0.85)
 
-            # Clean up temp file if created
-            if temp_file:
-                import os
-                try:
-                    os.unlink(temp_file.name)
-                except:
-                    pass
+            # Clean up temp file
+            try:
+                os.unlink(processing_file)
+            except:
+                pass
 
             if best_match and best_similarity >= threshold:
                 logging.info(f"Matched to speaker: {best_match} (similarity: {best_similarity:.3f})")
@@ -617,10 +805,9 @@ class SpeakerIdentifier:
             import traceback
             logging.debug(traceback.format_exc())
             # Clean up temp file if it exists
-            if 'temp_file' in locals() and temp_file:
+            if 'processing_file' in locals() and processing_file:
                 try:
-                    import os
-                    os.unlink(temp_file.name)
+                    os.unlink(processing_file)
                 except:
                     pass
             return "Miscellaneous Speakers"
@@ -688,7 +875,7 @@ class AudioFileManager:
         self.setup_logging()
         
         self.audio_processor = AudioProcessor(self.config)
-        self.transcriber = Transcriber(self.config)
+        self.transcriber = Transcriber(self.config, self.audio_processor)  # Pass audio_processor for chunking
         self.speaker_identifier = SpeakerIdentifier(self.config, self.audio_processor)
         self.file_organizer = FileOrganizer(self.config)
         
@@ -746,27 +933,71 @@ class AudioFileManager:
     
     def process_audio_file(self, file_path: str) -> bool:
         """Process a single audio file."""
+        import gc
+
         try:
             logging.info(f"Processing: {file_path}")
-            
+            log_memory_usage("before processing")
+
             # Transcribe audio
             transcript = self.transcriber.transcribe_audio(file_path)
             if not transcript:
                 logging.error(f"Failed to transcribe: {file_path}")
                 return False
-            
+
+            # MEMORY OPTIMIZATION: Clear transcription model from memory if using regular Whisper
+            if hasattr(self.transcriber, 'model') and self.transcriber.model is not None:
+                if not self.transcriber.use_mlx:
+                    # Unload regular Whisper model after use
+                    del self.transcriber.model
+                    self.transcriber.model = None
+                    gc.collect()
+                    logging.debug("Unloaded Whisper model after transcription")
+
+            log_memory_usage("after transcription")
+
             # Generate description
             description = self.transcriber.generate_description(transcript)
-            
+
             # Identify speaker
             speaker_name = self.speaker_identifier.identify_speaker(file_path)
-            
+
+            log_memory_usage("after speaker identification")
+
+            # MEMORY OPTIMIZATION: Unload Pyannote models after use
+            self.speaker_identifier.unload_models()
+
+            log_memory_usage("after model unloading")
+
             # Organize file
             self.file_organizer.organize_file(file_path, speaker_name, description, transcript)
-            
+
+            # MEMORY OPTIMIZATION: Clear large variables and force garbage collection
+            del transcript
+            del description
+            del speaker_name
+
+            # Multiple rounds of garbage collection
+            for _ in range(3):
+                gc.collect()
+
+            # Clear GPU/MPS cache aggressively
+            try:
+                import torch
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+                    torch.mps.synchronize()  # Wait for all operations to complete
+                elif torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+            except Exception as e:
+                logging.debug(f"Error clearing GPU cache: {e}")
+
+            log_memory_usage("after cleanup")
+
             logging.info(f"Successfully processed: {file_path}")
             return True
-            
+
         except Exception as e:
             logging.error(f"Error processing {file_path}: {e}")
             return False
@@ -789,7 +1020,8 @@ class AudioFileManager:
     def run(self, force_full_scan: bool = False):
         """Run the complete audio file management process."""
         logging.info("Starting MLX Talks Categorizer")
-        
+        log_memory_usage("at startup")
+
         # Determine date range for processing
         if force_full_scan:
             since_date = datetime.min

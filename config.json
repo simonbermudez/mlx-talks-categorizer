@@ -15,10 +15,16 @@
   "transcripts_path": "./organized_talks/transcripts",
   "raw_talks_path": "./organized_talks/raw talks",
   "last_run_file": "last_run.json",
-  "whisper_model": "base",
-  "speaker_similarity_threshold": 0.85,
+  "whisper_model": "tiny",
+  "speaker_similarity_threshold": 0.80,
   "cleanup_days": 30,
   "log_level": "INFO",
+  "memory_optimizations": {
+    "enable_chunked_transcription": true,
+    "transcription_chunk_size_seconds": 300,
+    "speaker_identification_sample_seconds": 30,
+    "speaker_identification_sample_offset": 60
+  },
   "title_generation": {
     "method": "openai",
     "openai_api_key": "",
