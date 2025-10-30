@@ -211,5 +211,5 @@ organized_talks/
 test/
 cache/
 
-config.json.backup
+config.json
 last_run.json

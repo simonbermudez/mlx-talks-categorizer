@@ -621,12 +621,41 @@ class SpeakerIdentifier:
             # Load speakers from cache into memory
             self.speaker_embeddings.update(speakers_from_cache)
 
-            # If there are no new speakers to process, we're done
+            # If there are no new speakers to process, still need to load embedding model for identification
             if not speakers_to_process:
                 logging.info(f"All {len(self.speaker_embeddings)} speaker(s) loaded from cache")
-                return
+                # Load ONLY the embedding model (not diarization) for speaker identification
+                from pyannote.audio import Inference
+                import torch
 
-            # Only load models if we have new speakers to process
+                embedding_models = [
+                    "pyannote/embedding",  # Preferred but gated
+                    "pyannote/wespeaker-voxceleb-resnet34-LM",  # Open alternative
+                ]
+
+                for model_id in embedding_models:
+                    try:
+                        logging.info(f"Loading embedding model for speaker identification: {model_id}")
+                        self.embedding_model = Inference(model_id, use_auth_token=self.hf_token)
+
+                        # Move embedding model to GPU if available
+                        if torch.backends.mps.is_available():
+                            self.embedding_model.to(torch.device("mps"))
+                        elif torch.cuda.is_available():
+                            self.embedding_model.to(torch.device("cuda"))
+
+                        logging.info(f"Speaker embedding model loaded successfully: {model_id}")
+                        break  # Success, exit loop
+                    except Exception as e:
+                        logging.warning(f"Failed to load {model_id}: {e}")
+                        if model_id == embedding_models[-1]:
+                            # Last model failed, raise error
+                            raise Exception(f"Could not load any embedding model. Please accept terms at https://hf.co/pyannote/embedding or https://hf.co/pyannote/wespeaker-voxceleb-resnet34-LM")
+                        continue
+
+                return  # Done - embeddings loaded from cache and model ready for identification
+
+            # Only load BOTH models if we have new speakers to process
             logging.info(f"Loading Pyannote models for {len(speakers_to_process)} new/updated speaker(s)")
 
             # Load the diarization pipeline
