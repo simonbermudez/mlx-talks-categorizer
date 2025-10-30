@@ -209,6 +209,7 @@ __marimo__/
 
 organized_talks/
 test/
+cache/
 
 config.json.backup
 last_run.json

@@ -14,6 +14,7 @@
   "talks_path": "./organized_talks/talks",
   "transcripts_path": "./organized_talks/transcripts",
   "raw_talks_path": "./organized_talks/raw talks",
+  "cache_dir": "./cache",
   "last_run_file": "last_run.json",
   "whisper_model": "tiny",
   "speaker_similarity_threshold": 0.80,

@@ -451,6 +451,10 @@ class SpeakerIdentifier:
         self.embedding_model = None  # Separate embedding model for speaker identification
         self._models_loaded = False  # Track if models are loaded
 
+        # Cache directory for speaker embeddings
+        self.cache_dir = Path(config.get("cache_dir", "./cache"))
+        self.embeddings_cache_file = self.cache_dir / "speaker_embeddings.pkl"
+
         # Get Pyannote configuration
         pyannote_config = config.get("pyannote", {})
         self.hf_token = pyannote_config.get("hf_token", "")
@@ -476,6 +480,46 @@ class SpeakerIdentifier:
             logging.info("Lazy loading Pyannote models...")
             self.load_speaker_samples()
             self._models_loaded = True
+
+    def _compute_file_hash(self, file_path: str) -> str:
+        """Compute SHA256 hash of a file for cache validation."""
+        import hashlib
+        hash_sha256 = hashlib.sha256()
+        try:
+            with open(file_path, "rb") as f:
+                # Read in chunks to handle large files
+                for chunk in iter(lambda: f.read(8192), b""):
+                    hash_sha256.update(chunk)
+            return hash_sha256.hexdigest()
+        except Exception as e:
+            logging.warning(f"Failed to compute hash for {file_path}: {e}")
+            return ""
+
+    def _load_embeddings_cache(self) -> dict:
+        """Load cached embeddings from disk."""
+        if not self.embeddings_cache_file.exists():
+            return {}
+
+        try:
+            import pickle
+            with open(self.embeddings_cache_file, 'rb') as f:
+                cache = pickle.load(f)
+            logging.info(f"Loaded embeddings cache with {len(cache)} speaker(s)")
+            return cache
+        except Exception as e:
+            logging.warning(f"Failed to load embeddings cache: {e}")
+            return {}
+
+    def _save_embeddings_cache(self, cache: dict):
+        """Save embeddings cache to disk."""
+        try:
+            import pickle
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.embeddings_cache_file, 'wb') as f:
+                pickle.dump(cache, f)
+            logging.info(f"Saved embeddings cache with {len(cache)} speaker(s)")
+        except Exception as e:
+            logging.error(f"Failed to save embeddings cache: {e}")
 
     def unload_models(self):
         """Unload models to free memory (aggressive memory optimization)."""
@@ -518,7 +562,7 @@ class SpeakerIdentifier:
             logging.debug(f"Error clearing GPU cache: {e}")
 
     def load_speaker_samples(self):
-        """Load speaker samples and create embeddings using Pyannote."""
+        """Load speaker samples and create embeddings using Pyannote (with persistent caching)."""
         if not PYANNOTE_AVAILABLE or not self.hf_token:
             logging.warning("Cannot load speaker samples: Pyannote not available or token missing")
             return
@@ -529,6 +573,62 @@ class SpeakerIdentifier:
             return
 
         try:
+            # Load existing cache
+            cache = self._load_embeddings_cache()
+
+            # Collect all current speaker files and compute their hashes
+            supported_formats = self.config.get("supported_formats", [".mp3", ".wav", ".mp4"])
+            speaker_files = {}
+            current_file_hashes = {}  # Maps speaker_name -> {file_path: hash}
+
+            for format_ext in supported_formats:
+                pattern = f"*{format_ext}"
+                for speaker_file in self.speakers_path.glob(pattern):
+                    # Extract speaker name (handle multiple files per speaker)
+                    speaker_name = speaker_file.stem
+                    # Remove numeric suffixes for multiple samples (e.g., "John_1" -> "John")
+                    speaker_name = re.sub(r'_\d+$', '', speaker_name)
+
+                    if speaker_name not in speaker_files:
+                        speaker_files[speaker_name] = []
+                        current_file_hashes[speaker_name] = {}
+
+                    file_path = str(speaker_file)
+                    speaker_files[speaker_name].append(file_path)
+                    current_file_hashes[speaker_name][file_path] = self._compute_file_hash(file_path)
+
+            # Determine which speakers need new embeddings
+            speakers_to_process = {}
+            speakers_from_cache = {}
+
+            for speaker_name, files in speaker_files.items():
+                # Check if speaker exists in cache with matching file hashes
+                if speaker_name in cache:
+                    cached_data = cache[speaker_name]
+                    cached_hashes = cached_data.get('file_hashes', {})
+
+                    # Check if all files match the cache
+                    if cached_hashes == current_file_hashes[speaker_name]:
+                        # Cache is valid, use it
+                        speakers_from_cache[speaker_name] = cached_data['embedding']
+                        logging.info(f"Using cached embedding for speaker: {speaker_name}")
+                        continue
+
+                # Cache miss or invalidated - need to regenerate
+                speakers_to_process[speaker_name] = files
+                logging.info(f"Will generate new embedding for speaker: {speaker_name}")
+
+            # Load speakers from cache into memory
+            self.speaker_embeddings.update(speakers_from_cache)
+
+            # If there are no new speakers to process, we're done
+            if not speakers_to_process:
+                logging.info(f"All {len(self.speaker_embeddings)} speaker(s) loaded from cache")
+                return
+
+            # Only load models if we have new speakers to process
+            logging.info(f"Loading Pyannote models for {len(speakers_to_process)} new/updated speaker(s)")
+
             # Load the diarization pipeline
             logging.info(f"Loading Pyannote model: {self.model_name}")
             self.diarization_pipeline = Pipeline.from_pretrained(
@@ -576,24 +676,8 @@ class SpeakerIdentifier:
                         raise Exception(f"Could not load any embedding model. Please accept terms at https://hf.co/pyannote/embedding or https://hf.co/pyannote/wespeaker-voxceleb-resnet34-LM")
                     continue
 
-            # Load speaker samples from all supported formats
-            supported_formats = self.config.get("supported_formats", [".mp3", ".wav", ".mp4"])
-            speaker_files = {}
-
-            for format_ext in supported_formats:
-                pattern = f"*{format_ext}"
-                for speaker_file in self.speakers_path.glob(pattern):
-                    # Extract speaker name (handle multiple files per speaker)
-                    speaker_name = speaker_file.stem
-                    # Remove numeric suffixes for multiple samples (e.g., "John_1" -> "John")
-                    speaker_name = re.sub(r'_\d+$', '', speaker_name)
-
-                    if speaker_name not in speaker_files:
-                        speaker_files[speaker_name] = []
-                    speaker_files[speaker_name].append(str(speaker_file))
-
-            # Create embeddings for each speaker
-            for speaker_name, files in speaker_files.items():
+            # Create embeddings for new/updated speakers only
+            for speaker_name, files in speakers_to_process.items():
                 logging.info(f"Creating embedding for speaker: {speaker_name} ({len(files)} sample(s))")
 
                 # Process all files for this speaker and average embeddings
@@ -664,13 +748,29 @@ class SpeakerIdentifier:
                     # Average all embeddings for this speaker
                     avg_embedding = np.mean(all_embeddings, axis=0)
                     # MEMORY OPTIMIZATION: Store embeddings as float16 to reduce memory usage
-                    self.speaker_embeddings[speaker_name] = avg_embedding.astype(np.float16)
+                    embedding_float16 = avg_embedding.astype(np.float16)
+                    self.speaker_embeddings[speaker_name] = embedding_float16
+
+                    # Update cache with new embedding and file hashes
+                    cache[speaker_name] = {
+                        'embedding': embedding_float16,
+                        'file_hashes': current_file_hashes[speaker_name],
+                        'timestamp': datetime.now().isoformat()
+                    }
+
                     logging.info(f"Successfully enrolled speaker: {speaker_name} (embedding shape: {avg_embedding.shape})")
                 else:
                     logging.warning(f"No valid embeddings extracted for {speaker_name}")
 
-            if self.speaker_embeddings:
-                logging.info(f"Enrolled {len(self.speaker_embeddings)} speaker(s)")
+            # Save updated cache to disk
+            self._save_embeddings_cache(cache)
+
+            total_speakers = len(self.speaker_embeddings)
+            cached_count = len(speakers_from_cache)
+            new_count = len([s for s in speakers_to_process if s in self.speaker_embeddings])
+
+            if total_speakers:
+                logging.info(f"Enrolled {total_speakers} speaker(s) total ({cached_count} from cache, {new_count} newly generated)")
             else:
                 logging.warning("No speakers enrolled successfully")
 
