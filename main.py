@@ -70,6 +70,7 @@ class Config:
         self.config_path = config_path
         self.default_config = {
             "min_duration_minutes": 10,
+            "max_duration_minutes": None,  # Set to null for no limit, or a number for maximum duration
             "supported_formats": [".mp3", ".wav", ".mp4"],
             "audio_inputs": [
                 "~/Google Drive/Audio",
@@ -132,6 +133,8 @@ class AudioProcessor:
     def __init__(self, config: Config):
         self.config = config
         self.min_duration = config.get("min_duration_minutes") * 60  # Convert to seconds
+        max_duration_minutes = config.get("max_duration_minutes")
+        self.max_duration = max_duration_minutes * 60 if max_duration_minutes else None  # Convert to seconds or None
         self.supported_formats = config.get("supported_formats")
     
     def get_audio_duration(self, file_path: str) -> float:
@@ -158,7 +161,7 @@ class AudioProcessor:
             return 0
     
     def is_valid_audio_file(self, file_path: str) -> bool:
-        """Check if file is a valid audio file with minimum duration."""
+        """Check if file is a valid audio file with minimum and maximum duration."""
         if not os.path.exists(file_path):
             return False
 
@@ -169,7 +172,17 @@ class AudioProcessor:
 
         # Check duration
         duration = self.get_audio_duration(file_path)
-        return duration >= self.min_duration
+
+        # Check minimum duration
+        if duration < self.min_duration:
+            return False
+
+        # Check maximum duration (if configured)
+        if self.max_duration is not None and duration > self.max_duration:
+            logging.debug(f"File exceeds max duration ({duration/60:.1f} > {self.max_duration/60:.1f} minutes): {file_path}")
+            return False
+
+        return True
 
     def extract_audio_chunk(self, file_path: str, start_sec: float, duration_sec: float, output_path: str) -> bool:
         """
