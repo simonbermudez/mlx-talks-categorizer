@@ -86,6 +86,14 @@ class Config:
             "speaker_similarity_threshold": 0.5,  # Pyannote similarity threshold (0-1 range)
             "cleanup_days": 30,
             "log_level": "INFO",  # Logging level: DEBUG, INFO, WARNING, ERROR
+            "audio_preprocessing": {
+                "enable_silence_removal": True,  # Enable/disable silence removal preprocessing
+                "silence_threshold": "-30dB",  # Silence detection threshold (lower = more aggressive)
+                "silence_duration": "1.0",  # Minimum silence duration in seconds to remove
+                "output_format": "mp3",  # Output format after preprocessing (mp3, wav)
+                "mp3_bitrate": "64k",  # MP3 bitrate for output (lower = smaller files, 64k good for voice)
+                "mp3_quality": "2"  # MP3 VBR quality (0-9, lower is better, 2 is high quality)
+            },
             "title_generation": {
                 "method": "openai",
                 "openai_api_key": "",
@@ -129,13 +137,14 @@ class Config:
 
 class AudioProcessor:
     """Handles audio file processing and filtering."""
-    
+
     def __init__(self, config: Config):
         self.config = config
         self.min_duration = config.get("min_duration_minutes") * 60  # Convert to seconds
         max_duration_minutes = config.get("max_duration_minutes")
         self.max_duration = max_duration_minutes * 60 if max_duration_minutes else None  # Convert to seconds or None
         self.supported_formats = config.get("supported_formats")
+        self.preprocessing_config = config.get("audio_preprocessing", {})
     
     def get_audio_duration(self, file_path: str) -> float:
         """Get duration of audio file in seconds (MEMORY OPTIMIZED - no file loading)."""
@@ -214,6 +223,128 @@ class AudioProcessor:
         except Exception as e:
             logging.error(f"Error extracting audio chunk: {e}")
             return False
+
+    def preprocess_audio(self, file_path: str, output_path: str) -> Optional[str]:
+        """
+        Preprocess audio file with silence removal and format conversion.
+
+        This function performs the following operations:
+        1. Remove silence from the audio file
+        2. Convert to MP3 format with optimized settings for voice
+        3. Save the processed file
+
+        Args:
+            file_path: Source audio file path
+            output_path: Output file path for processed audio
+
+        Returns:
+            Path to processed audio file, or None if preprocessing failed
+        """
+        if not self.preprocessing_config.get("enable_silence_removal", False):
+            # Preprocessing disabled - return original file
+            return file_path
+
+        try:
+            logging.info(f"Preprocessing audio: {file_path}")
+
+            # Get preprocessing configuration
+            silence_threshold = self.preprocessing_config.get("silence_threshold", "-30dB")
+            silence_duration = self.preprocessing_config.get("silence_duration", "1.0")
+            output_format = self.preprocessing_config.get("output_format", "mp3")
+            mp3_bitrate = self.preprocessing_config.get("mp3_bitrate", "64k")
+            mp3_quality = self.preprocessing_config.get("mp3_quality", "2")
+
+            # Build ffmpeg command for silence removal and format conversion
+            # silenceremove filter parameters:
+            # - start_periods=1: remove silence at the beginning
+            # - start_duration: minimum silence duration at start to remove
+            # - start_threshold: silence threshold for start
+            # - stop_periods=-1: remove all silences at the end
+            # - stop_duration: minimum silence duration to remove
+            # - stop_threshold: silence threshold for removal
+            # - detection=peak: use peak detection (better for speech)
+
+            filter_complex = (
+                f"silenceremove="
+                f"start_periods=1:"
+                f"start_duration={silence_duration}:"
+                f"start_threshold={silence_threshold}:"
+                f"stop_periods=-1:"
+                f"stop_duration={silence_duration}:"
+                f"stop_threshold={silence_threshold}:"
+                f"detection=peak"
+            )
+
+            # Build ffmpeg command
+            cmd = [
+                'ffmpeg',
+                '-i', file_path,  # Input file
+                '-af', filter_complex,  # Apply audio filter
+                '-vn',  # Remove video stream (for MP4 inputs)
+            ]
+
+            # Add format-specific options
+            if output_format == "mp3":
+                cmd.extend([
+                    '-acodec', 'libmp3lame',  # MP3 codec
+                    '-b:a', mp3_bitrate,  # Bitrate
+                    '-q:a', mp3_quality,  # VBR quality
+                    '-ar', '44100',  # Sample rate (44.1kHz standard for MP3)
+                    '-ac', '1',  # Mono (sufficient for voice, reduces file size)
+                ])
+            elif output_format == "wav":
+                cmd.extend([
+                    '-acodec', 'pcm_s16le',  # WAV codec
+                    '-ar', '16000',  # Sample rate
+                    '-ac', '1',  # Mono
+                ])
+
+            cmd.extend([
+                '-y',  # Overwrite output file
+                output_path
+            ])
+
+            # Execute ffmpeg command
+            logging.debug(f"Running ffmpeg with command: {' '.join(cmd)}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600  # 10 minute timeout for long files
+            )
+
+            if result.returncode == 0:
+                # Check if output file was created and is valid
+                if os.path.exists(output_path):
+                    output_duration = self.get_audio_duration(output_path)
+                    original_duration = self.get_audio_duration(file_path)
+
+                    if output_duration > 0:
+                        time_saved = original_duration - output_duration
+                        percentage_removed = (time_saved / original_duration * 100) if original_duration > 0 else 0
+
+                        logging.info(
+                            f"Preprocessing completed: "
+                            f"{original_duration:.1f}s -> {output_duration:.1f}s "
+                            f"(removed {time_saved:.1f}s / {percentage_removed:.1f}%)"
+                        )
+                        return output_path
+                    else:
+                        logging.error(f"Preprocessed file has zero duration: {output_path}")
+                        return None
+                else:
+                    logging.error(f"Preprocessed file was not created: {output_path}")
+                    return None
+            else:
+                logging.error(f"ffmpeg preprocessing failed: {result.stderr}")
+                return None
+
+        except subprocess.TimeoutExpired:
+            logging.error(f"Preprocessing timeout for {file_path}")
+            return None
+        except Exception as e:
+            logging.error(f"Error preprocessing audio {file_path}: {e}")
+            return None
 
 
 class Transcriber:
@@ -977,36 +1108,34 @@ class FileOrganizer:
         """Organize a processed audio file."""
         source_path = Path(source_file)
         year = str(datetime.now().year)
-        
+
         # Create speaker directory for this year (for audio files)
         speaker_year_dir = self.talks_path / year / speaker_name
         speaker_year_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Create speaker directory for transcripts
         transcript_speaker_year_dir = self.transcripts_path / year / speaker_name
         transcript_speaker_year_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Generate filenames
+
+        # Generate filenames - use the extension from the preprocessed file
         base_filename = f"{speaker_name} - {description}"
         audio_filename = f"{base_filename}{source_path.suffix}"
         transcript_filename = f"{base_filename} (Transcript).txt"
-        
-        # Copy audio file to talks directory
+
+        # Copy audio file to talks directory (this is the preprocessed file if preprocessing was enabled)
         audio_dest = speaker_year_dir / audio_filename
         shutil.copy2(source_file, audio_dest)
         logging.info(f"Organized audio: {audio_dest}")
-        
+
         # Save transcript to separate transcripts directory
         transcript_dest = transcript_speaker_year_dir / transcript_filename
         with open(transcript_dest, 'w', encoding='utf-8') as f:
             f.write(transcript)
         logging.info(f"Saved transcript: {transcript_dest}")
-        
-        # Copy to raw talks for backup
-        raw_dest = self.raw_talks_path / source_path.name
-        if not raw_dest.exists():
-            shutil.copy2(source_file, raw_dest)
-            logging.info(f"Backed up to raw talks: {raw_dest}")
+
+        # Note: We don't copy the preprocessed file to raw talks
+        # The raw talks backup should contain the original file if needed
+        # This is handled separately in the processing pipeline
 
 
 class AudioFileManager:
@@ -1076,15 +1205,48 @@ class AudioFileManager:
     def process_audio_file(self, file_path: str) -> bool:
         """Process a single audio file."""
         import gc
+        import tempfile
 
         try:
             logging.info(f"Processing: {file_path}")
             log_memory_usage("before processing")
 
-            # Transcribe audio
-            transcript = self.transcriber.transcribe_audio(file_path)
+            # PREPROCESSING: Apply silence removal and format conversion if enabled
+            processed_file = file_path
+            temp_processed_file = None
+            preprocessing_config = self.config.get("audio_preprocessing", {})
+
+            if preprocessing_config.get("enable_silence_removal", False):
+                # Create temporary file for preprocessed audio
+                output_format = preprocessing_config.get("output_format", "mp3")
+                file_ext = f".{output_format}"
+
+                temp_processed = tempfile.NamedTemporaryFile(suffix=file_ext, delete=False)
+                temp_processed_file = temp_processed.name
+                temp_processed.close()
+
+                # Preprocess the audio (silence removal + format conversion)
+                preprocessed_path = self.audio_processor.preprocess_audio(file_path, temp_processed_file)
+
+                if preprocessed_path:
+                    processed_file = preprocessed_path
+                    logging.info(f"Using preprocessed audio for transcription and speaker detection")
+                else:
+                    logging.warning(f"Preprocessing failed, using original file: {file_path}")
+                    # Clean up temp file if preprocessing failed
+                    if os.path.exists(temp_processed_file):
+                        os.unlink(temp_processed_file)
+                    temp_processed_file = None
+
+                log_memory_usage("after preprocessing")
+
+            # Transcribe audio (using preprocessed file if available)
+            transcript = self.transcriber.transcribe_audio(processed_file)
             if not transcript:
                 logging.error(f"Failed to transcribe: {file_path}")
+                # Clean up temp file
+                if temp_processed_file and os.path.exists(temp_processed_file):
+                    os.unlink(temp_processed_file)
                 return False
 
             # MEMORY OPTIMIZATION: Clear transcription model from memory if using regular Whisper
@@ -1101,8 +1263,8 @@ class AudioFileManager:
             # Generate description
             description = self.transcriber.generate_description(transcript)
 
-            # Identify speaker
-            speaker_name = self.speaker_identifier.identify_speaker(file_path)
+            # Identify speaker (using preprocessed file if available)
+            speaker_name = self.speaker_identifier.identify_speaker(processed_file)
 
             log_memory_usage("after speaker identification")
 
@@ -1111,8 +1273,23 @@ class AudioFileManager:
 
             log_memory_usage("after model unloading")
 
-            # Organize file
-            self.file_organizer.organize_file(file_path, speaker_name, description, transcript)
+            # Organize file (use preprocessed file if available, otherwise original)
+            self.file_organizer.organize_file(processed_file, speaker_name, description, transcript)
+
+            # Backup original file to raw talks if preprocessing was enabled
+            if preprocessing_config.get("enable_silence_removal", False) and processed_file != file_path:
+                raw_dest = self.file_organizer.raw_talks_path / Path(file_path).name
+                if not raw_dest.exists():
+                    shutil.copy2(file_path, raw_dest)
+                    logging.info(f"Backed up original file to raw talks: {raw_dest}")
+
+            # Clean up temporary preprocessed file (it's been copied to final location)
+            if temp_processed_file and os.path.exists(temp_processed_file):
+                try:
+                    os.unlink(temp_processed_file)
+                    logging.debug(f"Cleaned up temporary preprocessed file: {temp_processed_file}")
+                except Exception as e:
+                    logging.warning(f"Failed to clean up temp file {temp_processed_file}: {e}")
 
             # MEMORY OPTIMIZATION: Clear large variables and force garbage collection
             del transcript
@@ -1142,6 +1319,12 @@ class AudioFileManager:
 
         except Exception as e:
             logging.error(f"Error processing {file_path}: {e}")
+            # Clean up temp file if it exists
+            if 'temp_processed_file' in locals() and temp_processed_file and os.path.exists(temp_processed_file):
+                try:
+                    os.unlink(temp_processed_file)
+                except:
+                    pass
             return False
     
     def cleanup_old_files(self):
