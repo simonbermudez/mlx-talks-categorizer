@@ -26,6 +26,13 @@ from openai import OpenAI
 import subprocess
 import re
 
+# Audio metadata handling
+from mutagen import File as MutagenFile
+from mutagen.id3 import ID3, TIT2, TDRC, COMM
+from mutagen.mp3 import MP3
+from mutagen.wave import WAVE
+from mutagen.mp4 import MP4
+
 
 # MLX Whisper for transcription (Apple Silicon optimized)
 try:
@@ -61,6 +68,219 @@ def log_memory_usage(context: str = ""):
         logging.info(f"Memory usage {context}: {mem_mb:.1f} MB")
     except Exception as e:
         logging.debug(f"Could not log memory usage: {e}")
+
+
+class AudioMetadataHandler:
+    """Handles extraction and preservation of audio file metadata."""
+
+    @staticmethod
+    def extract_metadata(file_path: str) -> Dict:
+        """
+        Extract metadata from an audio file including:
+        - Original title
+        - Recording date
+        - All other relevant metadata
+
+        Returns a dictionary of metadata.
+        """
+        metadata = {
+            'original_title': None,
+            'recording_date': None,
+            'creation_date': None,
+            'artist': None,
+            'album': None,
+            'genre': None,
+            'comment': None,
+            'year': None,
+            'all_tags': {}
+        }
+
+        try:
+            audio_file = MutagenFile(file_path)
+
+            if audio_file is None:
+                logging.warning(f"Could not read metadata from {file_path}")
+                return metadata
+
+            # Extract common metadata based on file type
+            if isinstance(audio_file, MP3):
+                # MP3 with ID3 tags
+                if audio_file.tags:
+                    metadata['original_title'] = str(audio_file.tags.get('TIT2', [''])[0]) if 'TIT2' in audio_file.tags else None
+                    metadata['artist'] = str(audio_file.tags.get('TPE1', [''])[0]) if 'TPE1' in audio_file.tags else None
+                    metadata['album'] = str(audio_file.tags.get('TALB', [''])[0]) if 'TALB' in audio_file.tags else None
+                    metadata['genre'] = str(audio_file.tags.get('TCON', [''])[0]) if 'TCON' in audio_file.tags else None
+                    metadata['comment'] = str(audio_file.tags.get('COMM::eng', [''])[0]) if 'COMM::eng' in audio_file.tags else None
+
+                    # Recording date (TDRC - ID3v2.4)
+                    if 'TDRC' in audio_file.tags:
+                        metadata['recording_date'] = str(audio_file.tags.get('TDRC')[0])
+                    # Year (TYER - ID3v2.3)
+                    elif 'TYER' in audio_file.tags:
+                        metadata['year'] = str(audio_file.tags.get('TYER')[0])
+
+                    # Store all tags for preservation
+                    metadata['all_tags'] = dict(audio_file.tags)
+
+            elif isinstance(audio_file, MP4):
+                # MP4/M4A files
+                if audio_file.tags:
+                    metadata['original_title'] = audio_file.tags.get('\xa9nam', [None])[0]
+                    metadata['artist'] = audio_file.tags.get('\xa9ART', [None])[0]
+                    metadata['album'] = audio_file.tags.get('\xa9alb', [None])[0]
+                    metadata['genre'] = audio_file.tags.get('\xa9gen', [None])[0]
+                    metadata['comment'] = audio_file.tags.get('\xa9cmt', [None])[0]
+                    metadata['year'] = audio_file.tags.get('\xa9day', [None])[0]
+
+                    # Store all tags for preservation
+                    metadata['all_tags'] = dict(audio_file.tags)
+
+            elif isinstance(audio_file, WAVE):
+                # WAV files with INFO tags
+                if hasattr(audio_file, 'tags') and audio_file.tags:
+                    metadata['original_title'] = audio_file.tags.get('TIT2', [None])[0]
+                    metadata['artist'] = audio_file.tags.get('TPE1', [None])[0]
+                    metadata['comment'] = audio_file.tags.get('COMM', [None])[0]
+
+                    # Store all tags for preservation
+                    metadata['all_tags'] = dict(audio_file.tags)
+
+            # Fallback: Use filename as original title if no title tag found
+            if not metadata['original_title']:
+                metadata['original_title'] = Path(file_path).stem
+
+            # Get file creation/modification dates as fallback
+            file_stat = os.stat(file_path)
+            metadata['creation_date'] = datetime.fromtimestamp(file_stat.st_birthtime if hasattr(file_stat, 'st_birthtime') else file_stat.st_ctime)
+
+            logging.debug(f"Extracted metadata from {file_path}: {metadata}")
+
+        except Exception as e:
+            logging.warning(f"Error extracting metadata from {file_path}: {e}")
+            # Fallback to filename
+            metadata['original_title'] = Path(file_path).stem
+            try:
+                file_stat = os.stat(file_path)
+                metadata['creation_date'] = datetime.fromtimestamp(file_stat.st_birthtime if hasattr(file_stat, 'st_birthtime') else file_stat.st_ctime)
+            except:
+                pass
+
+        return metadata
+
+    @staticmethod
+    def copy_metadata(source_file: str, destination_file: str, metadata: Dict = None, add_original_title: bool = True):
+        """
+        Copy metadata from source to destination file.
+
+        Args:
+            source_file: Original audio file path
+            destination_file: Processed audio file path
+            metadata: Pre-extracted metadata dictionary (optional, will extract if not provided)
+            add_original_title: Whether to add the original title as a metadata field
+        """
+        try:
+            # Extract metadata from source if not provided
+            if metadata is None:
+                metadata = AudioMetadataHandler.extract_metadata(source_file)
+
+            # Load destination file
+            dest_audio = MutagenFile(destination_file)
+
+            if dest_audio is None:
+                logging.warning(f"Could not open destination file for metadata writing: {destination_file}")
+                return
+
+            # Copy metadata based on file type
+            if isinstance(dest_audio, MP3):
+                # Initialize ID3 tags if they don't exist
+                if dest_audio.tags is None:
+                    dest_audio.add_tags()
+
+                # Preserve recording date/year
+                if metadata.get('recording_date'):
+                    dest_audio.tags['TDRC'] = TDRC(encoding=3, text=metadata['recording_date'])
+                elif metadata.get('year'):
+                    dest_audio.tags['TDRC'] = TDRC(encoding=3, text=metadata['year'])
+                elif metadata.get('creation_date'):
+                    dest_audio.tags['TDRC'] = TDRC(encoding=3, text=metadata['creation_date'].strftime('%Y-%m-%d'))
+
+                # Add original title as a comment field
+                if add_original_title and metadata.get('original_title'):
+                    original_title_comment = f"Original Title: {metadata['original_title']}"
+                    dest_audio.tags['COMM::eng'] = COMM(encoding=3, lang='eng', desc='', text=original_title_comment)
+
+                # Preserve other metadata
+                if metadata.get('artist'):
+                    dest_audio.tags['TPE1'] = TIT2(encoding=3, text=metadata['artist'])
+                if metadata.get('album'):
+                    dest_audio.tags['TALB'] = TIT2(encoding=3, text=metadata['album'])
+                if metadata.get('genre'):
+                    dest_audio.tags['TCON'] = TIT2(encoding=3, text=metadata['genre'])
+
+            elif isinstance(dest_audio, MP4):
+                # MP4/M4A files
+                if dest_audio.tags is None:
+                    dest_audio.add_tags()
+
+                # Preserve recording date
+                if metadata.get('recording_date'):
+                    dest_audio.tags['\xa9day'] = [metadata['recording_date']]
+                elif metadata.get('year'):
+                    dest_audio.tags['\xa9day'] = [metadata['year']]
+                elif metadata.get('creation_date'):
+                    dest_audio.tags['\xa9day'] = [metadata['creation_date'].strftime('%Y-%m-%d')]
+
+                # Add original title as comment
+                if add_original_title and metadata.get('original_title'):
+                    original_title_comment = f"Original Title: {metadata['original_title']}"
+                    dest_audio.tags['\xa9cmt'] = [original_title_comment]
+
+                # Preserve other metadata
+                if metadata.get('artist'):
+                    dest_audio.tags['\xa9ART'] = [metadata['artist']]
+                if metadata.get('album'):
+                    dest_audio.tags['\xa9alb'] = [metadata['album']]
+                if metadata.get('genre'):
+                    dest_audio.tags['\xa9gen'] = [metadata['genre']]
+
+            elif isinstance(dest_audio, WAVE):
+                # WAV files with ID3 tags
+                if dest_audio.tags is None:
+                    dest_audio.add_tags()
+
+                # WAV files can use ID3 tags
+                if metadata.get('recording_date'):
+                    dest_audio.tags['TDRC'] = TDRC(encoding=3, text=metadata['recording_date'])
+                elif metadata.get('year'):
+                    dest_audio.tags['TDRC'] = TDRC(encoding=3, text=metadata['year'])
+                elif metadata.get('creation_date'):
+                    dest_audio.tags['TDRC'] = TDRC(encoding=3, text=metadata['creation_date'].strftime('%Y-%m-%d'))
+
+                # Add original title
+                if add_original_title and metadata.get('original_title'):
+                    original_title_comment = f"Original Title: {metadata['original_title']}"
+                    dest_audio.tags['COMM::eng'] = COMM(encoding=3, lang='eng', desc='', text=original_title_comment)
+
+            # Save metadata to destination file
+            dest_audio.save()
+            logging.info(f"Copied metadata to {destination_file}")
+
+        except Exception as e:
+            logging.warning(f"Error copying metadata from {source_file} to {destination_file}: {e}")
+
+    @staticmethod
+    def preserve_file_timestamps(source_file: str, destination_file: str):
+        """
+        Preserve filesystem timestamps from source to destination.
+        This is a supplementary method to shutil.copy2 for additional timestamp preservation.
+        """
+        try:
+            source_stat = os.stat(source_file)
+            # Set access and modification times
+            os.utime(destination_file, (source_stat.st_atime, source_stat.st_mtime))
+            logging.debug(f"Preserved timestamps from {source_file} to {destination_file}")
+        except Exception as e:
+            logging.warning(f"Error preserving timestamps: {e}")
 
 
 class Config:
@@ -1104,8 +1324,19 @@ class FileOrganizer:
             path.mkdir(parents=True, exist_ok=True)
             logging.info(f"Directory ready: {path}")
     
-    def organize_file(self, source_file: str, speaker_name: str, description: str, transcript: str):
-        """Organize a processed audio file."""
+    def organize_file(self, source_file: str, speaker_name: str, description: str, transcript: str,
+                      original_file: str = None, metadata: Dict = None):
+        """
+        Organize a processed audio file with metadata preservation.
+
+        Args:
+            source_file: Path to the processed audio file to be organized
+            speaker_name: Name of the identified speaker
+            description: Generated description for the talk
+            transcript: Full transcript text
+            original_file: Path to the original unprocessed file (for metadata extraction)
+            metadata: Pre-extracted metadata dictionary (optional)
+        """
         source_path = Path(source_file)
         year = str(datetime.now().year)
 
@@ -1126,6 +1357,26 @@ class FileOrganizer:
         audio_dest = speaker_year_dir / audio_filename
         shutil.copy2(source_file, audio_dest)
         logging.info(f"Organized audio: {audio_dest}")
+
+        # Preserve metadata from original file
+        if original_file and os.path.exists(original_file):
+            # Extract metadata from original file if not provided
+            if metadata is None:
+                metadata = AudioMetadataHandler.extract_metadata(original_file)
+
+            # Copy metadata to the organized file
+            AudioMetadataHandler.copy_metadata(
+                source_file=original_file,
+                destination_file=str(audio_dest),
+                metadata=metadata,
+                add_original_title=True
+            )
+
+            # Also preserve filesystem timestamps
+            AudioMetadataHandler.preserve_file_timestamps(original_file, str(audio_dest))
+            logging.info(f"Preserved metadata and timestamps for {audio_dest}")
+        else:
+            logging.debug(f"No original file provided for metadata preservation")
 
         # Save transcript to separate transcripts directory
         transcript_dest = transcript_speaker_year_dir / transcript_filename
@@ -1211,6 +1462,10 @@ class AudioFileManager:
             logging.info(f"Processing: {file_path}")
             log_memory_usage("before processing")
 
+            # METADATA EXTRACTION: Extract metadata from original file first
+            original_metadata = AudioMetadataHandler.extract_metadata(file_path)
+            logging.info(f"Extracted metadata from original file: {original_metadata.get('original_title', 'N/A')}")
+
             # PREPROCESSING: Apply silence removal and format conversion if enabled
             processed_file = file_path
             temp_processed_file = None
@@ -1274,13 +1529,23 @@ class AudioFileManager:
             log_memory_usage("after model unloading")
 
             # Organize file (use preprocessed file if available, otherwise original)
-            self.file_organizer.organize_file(processed_file, speaker_name, description, transcript)
+            # Pass original file path and metadata for preservation
+            self.file_organizer.organize_file(
+                source_file=processed_file,
+                speaker_name=speaker_name,
+                description=description,
+                transcript=transcript,
+                original_file=file_path,
+                metadata=original_metadata
+            )
 
             # Backup original file to raw talks if preprocessing was enabled
             if preprocessing_config.get("enable_silence_removal", False) and processed_file != file_path:
                 raw_dest = self.file_organizer.raw_talks_path / Path(file_path).name
                 if not raw_dest.exists():
                     shutil.copy2(file_path, raw_dest)
+                    # Preserve metadata and timestamps on the backup as well
+                    AudioMetadataHandler.preserve_file_timestamps(file_path, str(raw_dest))
                     logging.info(f"Backed up original file to raw talks: {raw_dest}")
 
             # Clean up temporary preprocessed file (it's been copied to final location)
