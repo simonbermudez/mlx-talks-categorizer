@@ -630,7 +630,7 @@ class Transcriber:
                     # Set HF token for model downloads
                     import os
                     os.environ['HF_TOKEN'] = self.hf_token
-                result = mlx_whisper.transcribe(file_path, path_or_hf_repo=self.model)
+                result = mlx_whisper.transcribe(file_path, path_or_hf_repo=self.model, language="en")
                 return result["text"].strip()
             else:
                 # MEMORY OPTIMIZATION: Lazy load regular Whisper model
@@ -643,7 +643,7 @@ class Transcriber:
                     logging.info(f"Whisper model loaded successfully")
 
                 # Regular Whisper transcription
-                result = self.model.transcribe(file_path)
+                result = self.model.transcribe(file_path, language="en")
                 return result["text"].strip()
         except Exception as e:
             logging.error(f"Error transcribing {file_path}: {e}")
