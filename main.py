@@ -526,13 +526,18 @@ class AudioProcessor:
                 output_path
             ])
 
+            # Calculate timeout based on duration (min 10 mins, or 0.5x duration for long files)
+            # This ensures we don't kill valid long processing, but still have a safety net
+            duration = self.get_audio_duration(file_path)
+            timeout = max(600, int(duration * 0.5))
+            
             # Execute ffmpeg command
             logging.debug(f"Running ffmpeg with command: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=600  # 10 minute timeout for long files
+                timeout=timeout
             )
 
             if result.returncode == 0:
@@ -594,6 +599,54 @@ def run_transcription_safe(file_path: str, model_path: str, is_mlx: bool, langua
             text = result["text"].strip()
             
         result_queue.put({"success": True, "text": text})
+    except Exception as e:
+        import traceback
+        result_queue.put({"success": False, "error": str(e), "traceback": traceback.format_exc()})
+
+
+def run_embedding_extraction_safe(file_path: str, hf_token: str, result_queue: multiprocessing.Queue):
+    """
+    Run embedding extraction in a separate process for robustness.
+    """
+    try:
+        # Imports inside process to ensure isolation
+        from pyannote.audio import Inference
+        import torch
+        import numpy as np
+        import logging
+        
+        # Try loading models (same logic as main class)
+        embedding_models = [
+            "pyannote/embedding",
+            "pyannote/wespeaker-voxceleb-resnet34-LM",
+        ]
+        
+        model = None
+        for model_id in embedding_models:
+            try:
+                model = Inference(model_id, use_auth_token=hf_token)
+                break
+            except Exception as e:
+                continue
+        
+        if model is None:
+            raise Exception("Could not load any embedding model")
+            
+        # Run inference
+        embedding = model({"audio": file_path})
+        
+        # Post-process embedding
+        if hasattr(embedding, 'data'):
+            embedding = embedding.data
+        if torch.is_tensor(embedding):
+            embedding = embedding.cpu().numpy()
+            
+        # Handle different embedding shapes (average if multiple frames)
+        if len(embedding.shape) > 1:
+            embedding = np.mean(embedding, axis=0)
+            
+        result_queue.put({"success": True, "embedding": embedding.flatten()})
+        
     except Exception as e:
         import traceback
         result_queue.put({"success": False, "error": str(e), "traceback": traceback.format_exc()})
@@ -681,7 +734,9 @@ class Transcriber:
             # Use multiprocessing to isolate the transcription
             # This allows us to kill it if it hangs
             ctx = multiprocessing.get_context('spawn')
-            result_queue = ctx.Queue()
+            # Use Manager Queue to avoid deadlock if the buffer is full and process is joined
+            manager = multiprocessing.Manager()
+            result_queue = manager.Queue()
             
             p = ctx.Process(
                 target=run_transcription_safe,
@@ -806,7 +861,8 @@ Respond with only the {max_words}-word title, no explanations or additional text
                 ],
                 temperature=0.3,
                 max_tokens=20,
-                top_p=0.9
+                top_p=0.9,
+                timeout=30  # Add explicit timeout
             )
 
             title = response.choices[0].message.content.strip()
@@ -1295,25 +1351,48 @@ class SpeakerIdentifier:
                 os.unlink(processing_file)
                 return "Miscellaneous Speakers"
 
-            # Extract embedding from the small sample
-            # The Inference model handles variable-length audio automatically
-            import numpy as np
-            import torch
-
-            embedding = self.embedding_model({"audio": processing_file})
-
-            # Convert to numpy array if needed
-            if hasattr(embedding, 'data'):
-                embedding = embedding.data
-            if torch.is_tensor(embedding):
-                embedding = embedding.cpu().numpy()
-
-            # Handle different embedding shapes
-            if len(embedding.shape) > 1:
-                # If multiple embeddings (e.g., sliding window), average them
-                unknown_embedding = np.mean(embedding, axis=0).flatten()
-            else:
-                unknown_embedding = embedding.flatten()
+            # Extract embedding using separate process for robustness
+            ctx = multiprocessing.get_context('spawn')
+            manager = multiprocessing.Manager()
+            result_queue = manager.Queue()
+            
+            p = ctx.Process(
+                target=run_embedding_extraction_safe,
+                args=(processing_file, self.hf_token, result_queue)
+            )
+            
+            p.start()
+            p.join(timeout=60) # 60s timeout for 30s clip
+            
+            if p.is_alive():
+                logging.error("Speaker identification timed out. Terminating process...")
+                p.terminate()
+                p.join()
+                # Clean up temp file
+                try:
+                    os.unlink(processing_file)
+                except:
+                    pass
+                return "Miscellaneous Speakers"
+                
+            if result_queue.empty():
+                logging.error("Speaker identification process returned no result")
+                try:
+                    os.unlink(processing_file)
+                except:
+                    pass
+                return "Miscellaneous Speakers"
+                
+            result = result_queue.get()
+            if not result["success"]:
+                logging.error(f"Speaker identification failed: {result['error']}")
+                try:
+                    os.unlink(processing_file)
+                except:
+                    pass
+                return "Miscellaneous Speakers"
+                
+            unknown_embedding = result["embedding"]
 
             logging.debug(f"Extracted embedding for unknown speaker (shape: {unknown_embedding.shape})")
 
