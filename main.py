@@ -14,6 +14,8 @@ from typing import List, Dict, Optional, Tuple
 import argparse
 import gc
 import psutil
+import multiprocessing
+import queue
 
 # Audio processing libraries
 import librosa
@@ -567,6 +569,36 @@ class AudioProcessor:
             return None
 
 
+
+def run_transcription_safe(file_path: str, model_path: str, is_mlx: bool, language: str, hf_token: str, result_queue: multiprocessing.Queue):
+    """
+    Run transcription in a separate process for robustness.
+    This prevents the main application from hanging if the transcription library stalls.
+    """
+    try:
+        text = ""
+        if is_mlx:
+            import mlx_whisper
+            import os
+            if hf_token:
+                os.environ['HF_TOKEN'] = hf_token
+            # MLX Whisper
+            result = mlx_whisper.transcribe(file_path, path_or_hf_repo=model_path, language=language)
+            text = result["text"].strip()
+        else:
+            import whisper
+            # Regular Whisper - load model here (overhead is worth the robustness)
+            # Note: model_path here is the model name (e.g., "medium")
+            model = whisper.load_model(model_path)
+            result = model.transcribe(file_path, language=language)
+            text = result["text"].strip()
+            
+        result_queue.put({"success": True, "text": text})
+    except Exception as e:
+        import traceback
+        result_queue.put({"success": False, "error": str(e), "traceback": traceback.format_exc()})
+
+
 class Transcriber:
     """Handles audio transcription using Whisper and title generation using OpenAI ChatGPT."""
 
@@ -622,31 +654,63 @@ class Transcriber:
             return self._transcribe_audio_full(file_path)
 
     def _transcribe_audio_full(self, file_path: str) -> Optional[str]:
-        """Transcribe entire audio file (original method)."""
+        """Transcribe entire audio file using a separate process for robustness."""
         try:
+            # Determine model path/name to pass to subprocess
             if self.use_mlx:
-                # MLX Whisper transcription with HF token for model download
-                if self.hf_token:
-                    # Set HF token for model downloads
-                    import os
-                    os.environ['HF_TOKEN'] = self.hf_token
-                result = mlx_whisper.transcribe(file_path, path_or_hf_repo=self.model, language="en")
-                return result["text"].strip()
+                model_arg = self.model  # This is the MLX model path string
             else:
-                # MEMORY OPTIMIZATION: Lazy load regular Whisper model
-                if self.model is None:
-                    if not WHISPER_AVAILABLE:
-                        logging.error("Whisper not available")
-                        return None
-                    logging.info(f"Loading Whisper model: {self.model_name}")
-                    self.model = whisper.load_model(self.model_name)
-                    logging.info(f"Whisper model loaded successfully")
+                model_arg = self.model_name  # This is the Whisper model name string
 
-                # Regular Whisper transcription
-                result = self.model.transcribe(file_path, language="en")
-                return result["text"].strip()
+            # Calculate timeout based on duration
+            # Default to 3x duration or minimum 10 minutes
+            duration = 0
+            if self.audio_processor:
+                duration = self.audio_processor.get_audio_duration(file_path)
+            
+            # If duration is 0 (failed to get), assume 1 hour to be safe
+            if duration <= 0:
+                duration = 3600
+                
+            # Timeout: 3x audio duration, but at least 10 minutes (600s) and max 4 hours
+            timeout = max(600, duration * 3)
+            timeout = min(timeout, 14400) # Cap at 4 hours
+            
+            logging.info(f"Starting transcription process with timeout of {timeout}s for {duration:.1f}s audio")
+
+            # Use multiprocessing to isolate the transcription
+            # This allows us to kill it if it hangs
+            ctx = multiprocessing.get_context('spawn')
+            result_queue = ctx.Queue()
+            
+            p = ctx.Process(
+                target=run_transcription_safe,
+                args=(file_path, model_arg, self.use_mlx, "en", self.hf_token, result_queue)
+            )
+            
+            p.start()
+            p.join(timeout)
+            
+            if p.is_alive():
+                logging.error(f"Transcription timed out after {timeout}s. Terminating process...")
+                p.terminate()
+                p.join()
+                return None
+            
+            if not result_queue.empty():
+                result = result_queue.get()
+                if result["success"]:
+                    return result["text"]
+                else:
+                    logging.error(f"Transcription process failed: {result['error']}")
+                    logging.debug(f"Traceback: {result.get('traceback', 'No traceback')}")
+                    return None
+            else:
+                logging.error("Transcription process finished but returned no result (crashed?)")
+                return None
+
         except Exception as e:
-            logging.error(f"Error transcribing {file_path}: {e}")
+            logging.error(f"Error managing transcription process for {file_path}: {e}")
             return None
 
     def _transcribe_audio_chunked(self, file_path: str) -> Optional[str]:
